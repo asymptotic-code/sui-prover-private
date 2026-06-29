@@ -1,0 +1,1 @@
+-- Stub for Prelude.MoveType (referenced as dead import by generated files).
