@@ -1,4 +1,6 @@
 pub mod build_model;
+pub mod lean_driver;
+pub mod lean_pipeline_overrides;
 pub mod legacy_builder;
 pub mod llm_explain;
 pub mod prompts;

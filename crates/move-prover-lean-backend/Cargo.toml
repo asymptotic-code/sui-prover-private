@@ -1,0 +1,25 @@
+[package]
+name = "move-prover-lean-backend"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+move-compiler.workspace = true
+move-model.workspace = true
+move-stackless-bytecode.workspace = true
+stackless-to-intermediate.workspace = true
+intermediate-theorem-format.workspace = true
+
+tokio.workspace = true
+log.workspace = true
+anyhow.workspace = true
+ethnum.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

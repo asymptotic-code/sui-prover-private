@@ -56,3 +56,7 @@ output/
 
 crates/sui-prover/tests/sources/*
 settings.local.json
+
+# prover telemetry logs
+sui-prover.log*
+sui-lean.log*
