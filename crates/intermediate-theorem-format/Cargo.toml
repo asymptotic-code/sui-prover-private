@@ -1,0 +1,21 @@
+[package]
+name = "intermediate-theorem-format"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+move-model.workspace = true
+log.workspace = true
+num.workspace = true
+ethnum.workspace = true
+petgraph.workspace = true
+indexmap.workspace = true
+
+[lib]
+doctest = false

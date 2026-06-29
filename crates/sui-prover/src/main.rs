@@ -8,6 +8,8 @@ use remote_config::RemoteConfig;
 use tracing::debug;
 
 mod build_model;
+mod lean_driver;
+mod lean_pipeline_overrides;
 mod legacy_builder;
 mod llm_explain;
 mod prompts;

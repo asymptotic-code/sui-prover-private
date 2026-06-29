@@ -6,9 +6,20 @@ members = [
   "crates/move-stackless-bytecode",
   "crates/move-prover-boogie-backend",
   "crates/lambda-boogie-handler",
+  "crates/intermediate-theorem-format",
+  "crates/stackless-to-intermediate",
+  "crates/move-prover-lean-backend",
 ]
 
 default-members = ["crates/sui-prover"]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+authors = ["Asymptotic <info@asymptotic.tech>"]
+license = "Apache-2.0"
+publish = false
+
 [profile.release]
 debug = 1
 split-debuginfo = 'packed'
@@ -33,6 +44,9 @@ mismatched_lifetime_syntaxes = "allow"
 
 [workspace.dependencies]
 move-model = { path = "crates/move-model" }
+intermediate-theorem-format = { path = "crates/intermediate-theorem-format" }
+stackless-to-intermediate = { path = "crates/stackless-to-intermediate" }
+move-prover-lean-backend = { path = "crates/move-prover-lean-backend" }
 move-stackless-bytecode = { path = "crates/move-stackless-bytecode" }
 move-prover-boogie-backend = { path = "crates/move-prover-boogie-backend" }
 

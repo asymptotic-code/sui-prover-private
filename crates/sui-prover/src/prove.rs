@@ -1,7 +1,16 @@
 use crate::build_model::build_model;
 use crate::llm_explain::explain_err;
 use crate::remote_config::RemoteConfig;
-use clap::Args;
+use clap::{Args, ValueEnum};
+
+/// Which verification backend to run. Boogie is the SMT/Boogie pipeline; Lean
+/// translates to Lean 4 and (unless `--generate-only`) invokes `lake build`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+pub enum Backend {
+    #[default]
+    Boogie,
+    Lean,
+}
 use codespan_reporting::term::termcolor::Buffer;
 use log::LevelFilter;
 use move_compiler::editions::{Edition, Flavor};
@@ -62,9 +71,13 @@ pub struct GeneralConfig {
     #[clap(name = "keep-temp", long, short = 'k', global = true)]
     pub keep_temp: bool,
 
-    /// Only generate Boogie code, without running the prover
+    /// Only generate backend code, without running the prover
     #[clap(name = "generate-only", long, short = 'g', global = true)]
     pub generate_only: bool,
+
+    /// Verification backend: `boogie` (default) or `lean`
+    #[clap(name = "backend", long, global = true, default_value_t = Backend::Boogie, value_enum)]
+    pub backend: Backend,
 
     /// Display detailed verification progress
     #[clap(name = "verbose", long, short = 'v', global = true)]
@@ -182,7 +195,21 @@ pub async fn execute(
         return Ok(());
     }
 
-    execute_backend_boogie(model, &general_config, remote_config, boogie_config, filter).await
+    match general_config.backend {
+        Backend::Boogie => {
+            execute_backend_boogie(model, &general_config, remote_config, boogie_config, filter)
+                .await
+        }
+        Backend::Lean => {
+            crate::lean_driver::execute_backend_lean(
+                model,
+                &package_targets,
+                /*include_all=*/ false,
+                general_config.generate_only,
+            )
+            .await
+        }
+    }
 }
 
 async fn execute_backend_boogie(

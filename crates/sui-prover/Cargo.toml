@@ -29,6 +29,7 @@ move-package.workspace = true
 move-model.workspace = true
 move-symbol-pool.workspace = true
 move-stackless-bytecode.workspace = true
+move-prover-lean-backend.workspace = true
 glob.workspace = true
 insta.workspace = true
 termcolor.workspace = true
