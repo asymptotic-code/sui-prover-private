@@ -90,11 +90,47 @@ fun withdraw_spec<T>(pool: &mut Pool<T>, shares_in: Balance<LP<T>>): Balance<T> 
 
 ## Running the Sui Prover
 
-Run from the `move.toml` directory:
+Run from the `Move.toml` directory:
 
 ```bash
 sui-prover
 ```
+
+### Generate Lean
+
+Select the Lean backend and use `--generate-only` to translate the package
+without invoking Lean:
+
+```bash
+sui-prover --backend lean --generate-only
+```
+
+You can run the command from another directory by passing the Move package
+path explicitly:
+
+```bash
+sui-prover --backend lean --generate-only --path /path/to/move/package
+```
+
+The generated Lean project, including its `lakefile.lean`, is written to the
+package's `output/` directory. To generate the project and type-check it with
+Lake in one step, omit `--generate-only` and ensure `lake` is on `PATH`:
+
+```bash
+sui-prover --backend lean
+```
+
+When developing against a local Sui checkout, point the prover at its framework
+packages and avoid refreshing git dependencies:
+
+```bash
+SUI_PROVER_FRAMEWORK_PATH=/path/to/sui/crates/sui-framework/packages \
+  sui-prover --backend lean --generate-only --skip-fetch-latest-git-deps \
+  --path /path/to/move/package
+```
+
+From this repository, replace `sui-prover` in the examples with
+`cargo run -p sui-prover --`.
 
 ## Claude Code Integration
 
