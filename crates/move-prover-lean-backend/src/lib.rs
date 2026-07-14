@@ -5,6 +5,9 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+const LEAN_AUTO_URL: &str = "https://github.com/leanprover-community/lean-auto.git";
+const LEAN_AUTO_REV: &str = "fcbce0f216e71516e88b784944636da4d28ee780";
+
 pub mod backend;
 pub mod escape;
 pub mod native_ghost_fields;
@@ -124,12 +127,16 @@ open Lake DSL
 package «{}» where
   moreLeanArgs := #["--tstack=1048576"]
 
+require auto from git
+  "{}" @
+  "{}"
+
 lean_lib Prelude where
   roots := #[`Prelude]
   globs := #[.submodules `Prelude]
 
 "#,
-        module_name
+        module_name, LEAN_AUTO_URL, LEAN_AUTO_REV
     );
 
     // Generate a lean_lib for each package
@@ -187,16 +194,57 @@ lean_lib Correctness where
         written,
     )?;
 
-    // Write minimal lake-manifest.json (compatible with Lake 4.15+)
     let manifest = format!(
-        r#"{{"version": "1.1.0",
+        r#"{{"version": "1.2.0",
  "packagesDir": ".lake/packages",
- "packages": [],
- "name": "«{}»",
- "lakeDir": ".lake"}}"#,
-        module_name
+ "packages":
+ [{{"url": "{}",
+   "type": "git",
+   "subDir": null,
+   "scope": "",
+   "rev": "{}",
+   "name": "auto",
+   "manifestFile": "lake-manifest.json",
+   "inputRev": "{}",
+   "inherited": false,
+   "configFile": "lakefile.lean"}}],
+ "name": "{}",
+ "lakeDir": ".lake",
+ "fixedToolchain": false}}"#,
+        LEAN_AUTO_URL, LEAN_AUTO_REV, LEAN_AUTO_REV, module_name
     );
     write_if_changed(&output_path.join("lake-manifest.json"), &manifest, written)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lakefile_includes_lean_auto() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut written = WrittenFiles::new();
+
+        write_lakefile(
+            dir.path(),
+            "test_project",
+            &["Test".to_owned()],
+            None,
+            None,
+            None,
+            &mut written,
+        )
+        .unwrap();
+
+        let lakefile = fs::read_to_string(dir.path().join("lakefile.lean")).unwrap();
+        assert!(lakefile.contains("require auto from git"));
+        assert!(lakefile.contains(LEAN_AUTO_URL));
+        assert!(lakefile.contains(LEAN_AUTO_REV));
+
+        let manifest = fs::read_to_string(dir.path().join("lake-manifest.json")).unwrap();
+        assert!(manifest.contains(LEAN_AUTO_URL));
+        assert!(manifest.contains(LEAN_AUTO_REV));
+    }
 }
