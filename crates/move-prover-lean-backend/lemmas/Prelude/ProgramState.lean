@@ -19,7 +19,16 @@ instance [Inhabited α] [Inhabited State] : Inhabited (Mutable α State) where
 @[reducible] def Mutable.compose (inner : Mutable α Mid) (outer : Mutable Mid Top) : Mutable α Top :=
   ⟨inner.val, fun v => outer.reconstruct (inner.reconstruct v)⟩
 
+-- Argument-flipped constructor: lets the renderer emit the reconstruct
+-- lambda BEFORE a multi-line value expression (a trailing multi-line
+-- application argument is the only line-break shape Lean's parser accepts
+-- inside nested paren groups).
+@[reducible] def Mutable.mkFlip (f : α → State) (v : α) : Mutable α State :=
+  ⟨v, f⟩
+
 @[simp] theorem Mutable.apply_mk (v : α) (f : α → State) : (Mutable.mk v f).apply = f v := rfl
+@[simp] theorem Mutable.apply_mkFlip (v : α) (f : α → State) : (Mutable.mkFlip f v).apply = f v := rfl
+@[simp] theorem Mutable.val_mkFlip (v : α) (f : α → State) : (Mutable.mkFlip f v).val = v := rfl
 @[simp] theorem Mutable.val_mk (v : α) (f : α → State) : (Mutable.mk v f).val = v := rfl
 @[simp] theorem Mutable.apply_set (m : Mutable α State) (v : α) : (m.set v).apply = m.reconstruct v := rfl
 @[simp] theorem Mutable.val_set (m : Mutable α State) (v : α) : (m.set v).val = v := rfl

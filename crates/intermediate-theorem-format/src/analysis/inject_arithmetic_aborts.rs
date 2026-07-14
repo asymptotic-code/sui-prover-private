@@ -63,12 +63,24 @@ pub fn inject_arithmetic_aborts(program: &mut Program) {
     // *before* walking. `walk` synthesises a callee-abort check at every
     // `Call` site (closing the gap that `compose_callee_aborts_option`
     // can't reach: Calls buried in a Let's value-position
-    // control-flow). Skip mapping into trivially-non-aborting natives
+    // control-flow). Skip mapping into trivially-non-aborting *natives*
     // (their `.aborts` body is `Bool(false)` at this point in the
     // pipeline) — the wrap would degenerate to `if false then some else
     // none` after folding, but the unfolded form trips on the same
     // Bool/Prop param-type asymmetries that `build_aborts_map` in
     // `aborts_derivation` documents.
+    //
+    // The `Bool(false)` skip is native-ONLY. For a *generated* callee the
+    // pre-inject Bool-shape `.aborts` body is not authoritative: this same
+    // pass re-derives that callee's `.aborts` from its impl body via `walk`
+    // in this run, and that walk-derived body may abort even when the stale
+    // Bool body says `false`. `Math_u256.div_mod` is exactly this shape — its
+    // pre-inject Bool `.aborts` is `Bool(false)` (the Bool derivation misses
+    // the `num / denom` div-by-zero), but its walk-derived `.aborts` correctly
+    // fires on `denom == 0`. Dropping such a callee from the map made a
+    // `let (_, _) := div_mod n 0` caller (the `#[expected_failure]`
+    // `test_div_mod_zero` driver) report `none`, so the expected abort was
+    // never observed.
     let mut by_module_name: HashMap<(usize, &str), FunctionID> = HashMap::new();
     for (id, func) in program.functions.iter() {
         by_module_name.insert((func.module_id, &func.name), id);
@@ -82,7 +94,9 @@ pub fn inject_arithmetic_aborts(program: &mut Program) {
         let aborts_name = format!("{}.aborts", func.name);
         if let Some(&aborts_id) = by_module_name.get(&(func.module_id, aborts_name.as_str())) {
             let aborts_func = program.functions.get(&aborts_id);
-            if matches!(&aborts_func.body, IRNode::Const(Const::Bool(false))) {
+            if aborts_func.is_native
+                && matches!(&aborts_func.body, IRNode::Const(Const::Bool(false)))
+            {
                 continue;
             }
             aborts_map_for_walk.insert(id, aborts_id);
@@ -106,8 +120,37 @@ pub fn inject_arithmetic_aborts(program: &mut Program) {
         let is_mutual_helper = func.mutual_group_id.is_some()
             && (func.name.contains(".while_") || func.name.contains(".after"));
         if is_mutual_helper {
-            updates.push((fn_id, IRNode::OptionNone));
-            continue;
+            // EXCEPTION: a loop whose exit continuation can itself abort (an
+            // `.after` helper containing an explicit `Abort` — the
+            // `#[expected_failure]` build-then-abort shape) must keep a
+            // faithful recursive `.aborts`: the exit abort happens with
+            // exit-time loop-carried values only the loop itself can compute,
+            // so the enclosing face cannot reconstruct it and gutting to
+            // `none` erases the expected abort entirely (validator_tests
+            // `*_too_long`). The gutted form stays for every other loop —
+            // the deep-recursion mitigation the gutting exists for.
+            // The exit abort can live in two places: a called `.after`
+            // helper's body, or — when the continuation was inlined into the
+            // loop's break/exit branches during structure building — directly
+            // in the loop helper's own impl body as an inline `Abort`.
+            // (`Abort`s in call-argument position are loop-invariant
+            // hypothesis placeholders, not value aborts — skip those.)
+            let exit_can_abort = impl_for
+                .get(&fn_id)
+                .map(|&impl_id| {
+                    let impl_body = &program.functions.get(&impl_id).body;
+                    has_inline_abort(impl_body)
+                        || impl_body.calls().any(|callee| {
+                            let cf = program.functions.get(&callee);
+                            cf.name.contains(".after")
+                                && cf.body.iter().any(|n| matches!(n, IRNode::Abort { .. }))
+                        })
+                })
+                .unwrap_or(false);
+            if !exit_can_abort {
+                updates.push((fn_id, IRNode::OptionNone));
+                continue;
+            }
         }
 
         // Single-pass derivation: `walk` over the implementation body emits
@@ -132,8 +175,17 @@ pub fn inject_arithmetic_aborts(program: &mut Program) {
                 // the `.aborts` def recursive. Other in-group calls (notably
                 // the loop helpers, whose `.aborts` are `Option.none` above)
                 // are emitted as ordinary none-valued checks.
+                //
+                // EXCEPT for the exit-abort loop helpers that reached here via
+                // the mutual-helper exception: their whole point is a faithful
+                // RECURSIVE `.aborts` (guard → self-check on the next
+                // iteration → exit-branch `after.aborts` with exit-time
+                // loop-carried values). Without the self-check, iterations ≥ 2
+                // — and hence the eventual exit abort — are never consulted.
                 let mut self_skip: HashSet<FunctionID> = HashSet::new();
-                self_skip.insert(impl_id);
+                if !is_mutual_helper {
+                    self_skip.insert(impl_id);
+                }
                 let ctx = WalkCtx {
                     reg,
                     aborts_map: &aborts_map_for_walk,
@@ -141,13 +193,49 @@ pub fn inject_arithmetic_aborts(program: &mut Program) {
                     native_aborts_ids: &native_aborts_for_walk,
                     same_group_impls: &self_skip,
                 };
-                walk(&impl_func.body, &ctx)
+                let walked = walk(&impl_func.body, &ctx);
+                // Recover explicit `assert!` aborts that the Body-mode prune
+                // (`try_abort_prune_if` in control-flow reconstruction) drops from
+                // the value body: lift them from the pre-derived (Aborts-mode)
+                // `.aborts` body with `drop_callee = true`, keeping ONLY the
+                // explicit-assert terminals (`walk` already synthesises the callee
+                // `.aborts` checks; dropping them here avoids the double-emission
+                // that motivated removing the old union). Without this, every Move
+                // `assert!` is silently absent from the derived `.aborts`.
+                //
+                // SKIP for self-/mutual-recursive impls: their `.aborts` carry
+                // `loop_hyp`/decreasing termination machinery whose client
+                // `by`-macros are tuned to the exact body structure, and chaining
+                // the assert residue changes the recursive call's context enough to
+                // break them (`simp made no progress`). Such functions keep the
+                // prior under-approximation; non-recursive `.aborts` — the common
+                // case, including loop continuations — recover their asserts.
+                let impl_recursive = impl_func.mutual_group_id.is_some()
+                    || impl_func.body.calls().any(|c| c == impl_id);
+                if impl_recursive {
+                    walked
+                } else {
+                    let asserts = collapse_none(transform_existing(
+                        program.functions.get(&fn_id).body.clone(),
+                        &aborts_ids,
+                        true,
+                    ));
+                    chain_option(walked, asserts)
+                }
             } else {
-                transform_existing(program.functions.get(&fn_id).body.clone(), &aborts_ids)
+                collapse_none(transform_existing(
+                    program.functions.get(&fn_id).body.clone(),
+                    &aborts_ids,
+                    false,
+                ))
             }
         } else {
             // No matching impl — lift the pre-derived aborts body.
-            transform_existing(program.functions.get(&fn_id).body.clone(), &aborts_ids)
+            collapse_none(transform_existing(
+                program.functions.get(&fn_id).body.clone(),
+                &aborts_ids,
+                false,
+            ))
         };
 
         updates.push((fn_id, body));
@@ -157,6 +245,21 @@ pub fn inject_arithmetic_aborts(program: &mut Program) {
         let func = program.functions.get_mut(fn_id);
         func.body = new_body;
         func.signature.return_type = Type::Option(Box::new(Type::MoveAbort));
+    }
+}
+
+/// True when `node` contains an explicit `Abort` in value position.
+/// `Abort`s appearing directly as call arguments are loop-invariant
+/// hypothesis proof placeholders (see the comment in `walk`'s `Call`
+/// arm), not value aborts, so they are excluded.
+fn has_inline_abort(node: &IRNode) -> bool {
+    match node {
+        IRNode::Abort { .. } => true,
+        IRNode::Call { args, .. } => args
+            .iter()
+            .filter(|a| !matches!(a, IRNode::Abort { .. }))
+            .any(has_inline_abort),
+        other => other.iter_children().any(has_inline_abort),
     }
 }
 
@@ -212,11 +315,100 @@ where
         .fold(IRNode::OptionNone, |acc, p| chain_option(acc, p))
 }
 
+/// Collapse subtrees that can never abort (every terminal is `OptionNone`) to
+/// `OptionNone`. The assert residue lifted by `transform_existing` carries the
+/// full value-body skeleton; for an assert-free function that is a dead
+/// all-`none` if/let chain, and for a function with real asserts it wraps the
+/// abort guards in dead structure. Folding the dead parts away leaves only the
+/// real `OptionSome` (assert) terminals — so an assert-free residue becomes
+/// `OptionNone` (then dropped by `chain_option`) and the `.aborts` spine stays
+/// flat. Any `OptionSome` is preserved, so this never changes which inputs
+/// abort.
+fn collapse_none(node: IRNode) -> IRNode {
+    match node {
+        IRNode::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            let then_branch = collapse_none(*then_branch);
+            let else_branch = collapse_none(*else_branch);
+            if matches!(then_branch, IRNode::OptionNone)
+                && matches!(else_branch, IRNode::OptionNone)
+            {
+                IRNode::OptionNone
+            } else {
+                IRNode::If {
+                    cond,
+                    then_branch: Box::new(then_branch),
+                    else_branch: Box::new(else_branch),
+                }
+            }
+        }
+        IRNode::Let {
+            pattern,
+            value,
+            body,
+        } => {
+            let body = collapse_none(*body);
+            if matches!(body, IRNode::OptionNone) {
+                IRNode::OptionNone
+            } else {
+                IRNode::Let {
+                    pattern,
+                    value,
+                    body: Box::new(body),
+                }
+            }
+        }
+        IRNode::Match { scrutinee, cases } => {
+            let cases: Vec<_> = cases
+                .into_iter()
+                .map(|(idx, binds, body)| (idx, binds, collapse_none(body)))
+                .collect();
+            if cases
+                .iter()
+                .all(|(_, _, b)| matches!(b, IRNode::OptionNone))
+            {
+                IRNode::OptionNone
+            } else {
+                IRNode::Match { scrutinee, cases }
+            }
+        }
+        IRNode::MatchOption {
+            scrutinee,
+            binding,
+            some_branch,
+            none_branch,
+        } => {
+            let none_branch = collapse_none(*none_branch);
+            // Abort-chain `orElse(scrut, none) = scrut`: drop a trivial none tail
+            // rather than leave `MoveAbort.orElse scrut none`.
+            let is_abort_chain = binding.as_ref() == "__abort"
+                && matches!(
+                    some_branch.as_ref(),
+                    IRNode::OptionSome(inner)
+                        if matches!(inner.as_ref(), IRNode::Var(v) if v.as_ref() == "__abort")
+                );
+            if is_abort_chain && matches!(none_branch, IRNode::OptionNone) {
+                return *scrutinee;
+            }
+            IRNode::MatchOption {
+                scrutinee,
+                binding,
+                some_branch,
+                none_branch: Box::new(none_branch),
+            }
+        }
+        other => other,
+    }
+}
+
 /// Walk the `.aborts` body that the upstream pipeline produced (Bool-shaped)
 /// and lift it to `Option MoveAbort`. This mirrors the previous pass: it
 /// rewrites Bool terminals, leaves `Call` to a sibling `.aborts` alone, and
 /// recurses into branch / Let-body positions.
-fn transform_existing(node: IRNode, aborts_ids: &HashSet<FunctionID>) -> IRNode {
+fn transform_existing(node: IRNode, aborts_ids: &HashSet<FunctionID>, drop_callee: bool) -> IRNode {
     match node {
         IRNode::Const(Const::Bool(true)) => user_assert_some(zero_u64()),
         IRNode::Const(Const::Bool(false)) => IRNode::OptionNone,
@@ -226,7 +418,18 @@ fn transform_existing(node: IRNode, aborts_ids: &HashSet<FunctionID>) -> IRNode 
             user_assert_some(code_expr)
         }
 
-        IRNode::Call { ref function, .. } if aborts_ids.contains(function) => node,
+        IRNode::Call { ref function, .. } if aborts_ids.contains(function) => {
+            // Assert-residue mode (`drop_callee`): drop callee `.aborts` calls —
+            // `walk` already synthesises a check at every `Call`, so keeping them
+            // here would double-emit (the reason the old `chain_option` union was
+            // removed). Keeping only the explicit-`assert!` terminals lets us
+            // re-add JUST the asserts the Body-mode prune dropped.
+            if drop_callee {
+                IRNode::OptionNone
+            } else {
+                node
+            }
+        }
 
         IRNode::If {
             cond,
@@ -234,15 +437,21 @@ fn transform_existing(node: IRNode, aborts_ids: &HashSet<FunctionID>) -> IRNode 
             else_branch,
         } => IRNode::If {
             cond,
-            then_branch: Box::new(transform_existing(*then_branch, aborts_ids)),
-            else_branch: Box::new(transform_existing(*else_branch, aborts_ids)),
+            then_branch: Box::new(transform_existing(*then_branch, aborts_ids, drop_callee)),
+            else_branch: Box::new(transform_existing(*else_branch, aborts_ids, drop_callee)),
         },
 
         IRNode::Match { scrutinee, cases } => IRNode::Match {
             scrutinee,
             cases: cases
                 .into_iter()
-                .map(|(idx, bindings, body)| (idx, bindings, transform_existing(body, aborts_ids)))
+                .map(|(idx, bindings, body)| {
+                    (
+                        idx,
+                        bindings,
+                        transform_existing(body, aborts_ids, drop_callee),
+                    )
+                })
                 .collect(),
         },
 
@@ -254,8 +463,8 @@ fn transform_existing(node: IRNode, aborts_ids: &HashSet<FunctionID>) -> IRNode 
         } => IRNode::MatchOption {
             scrutinee,
             binding,
-            some_branch: Box::new(transform_existing(*some_branch, aborts_ids)),
-            none_branch: Box::new(transform_existing(*none_branch, aborts_ids)),
+            some_branch: Box::new(transform_existing(*some_branch, aborts_ids, drop_callee)),
+            none_branch: Box::new(transform_existing(*none_branch, aborts_ids, drop_callee)),
         },
 
         IRNode::Let {
@@ -286,8 +495,8 @@ fn transform_existing(node: IRNode, aborts_ids: &HashSet<FunctionID>) -> IRNode 
                 IRNode::If { .. } | IRNode::Match { .. } | IRNode::MatchOption { .. }
             );
             if is_discard && value_is_control_flow {
-                let new_value = transform_existing(*value, aborts_ids);
-                let new_body = transform_existing(*body, aborts_ids);
+                let new_value = transform_existing(*value, aborts_ids, drop_callee);
+                let new_body = transform_existing(*body, aborts_ids, drop_callee);
                 // Trivial-none short-circuit: if the value can never
                 // abort, just emit the body directly.
                 if matches!(new_value, IRNode::OptionNone) {
@@ -304,7 +513,7 @@ fn transform_existing(node: IRNode, aborts_ids: &HashSet<FunctionID>) -> IRNode 
                 IRNode::Let {
                     pattern,
                     value,
-                    body: Box::new(transform_existing(*body, aborts_ids)),
+                    body: Box::new(transform_existing(*body, aborts_ids, drop_callee)),
                 }
             }
         }

@@ -829,6 +829,7 @@ fn create_typed_map_module(program: &mut Program) -> TypedMapFunctions {
             is_native: true,
             mutual_group_id: None,
             test_expectation: None,
+            is_uninterpreted: false,
         }
     };
 
@@ -878,6 +879,7 @@ fn create_typed_map_module(program: &mut Program) -> TypedMapFunctions {
             is_native: true,
             mutual_group_id: None,
             test_expectation: None,
+            is_uninterpreted: false,
         }
     };
 
@@ -1736,4 +1738,83 @@ fn references_any_of(node: &IRNode, names: &[TempId]) -> bool {
             .iter_children()
             .any(|child| references_any_of(child, names)),
     }
+}
+
+/// Collect the temps that hold a `Mutable` value borrowed from a
+/// `dynamic_object_field::borrow_mut` call (directly, or transitively via a
+/// destructure / `Mutable.set` reassignment).
+///
+/// Unlike `dynamic_field::borrow_mut` (which `rewrite_df_borrow_mut_pre_threading`
+/// rewrites into a `MutableBorrow` anchored on the *parent struct*), the
+/// `dynamic_object_field` variant is left as a native call whose result is
+/// anchored on the parent's `Object.UID` slot. When such a child later reaches
+/// a `WriteBackEdge::Field`, the renderer MUST keep the field-update form
+/// (`{ parent with id := Mutable.apply child }`) rather than collapsing to a
+/// plain `Mutable.apply child` (which would bind a `UID` into the parent slot,
+/// e.g. cetus `Pool::set_pool_status`). The renderer consults this set to
+/// suppress that collapse.
+pub fn collect_object_field_borrow_children(
+    program: &Program,
+    body: &IRNode,
+) -> std::collections::HashSet<TempId> {
+    let dof_module_id = program
+        .modules
+        .iter()
+        .find(|(_, m)| m.name == "dynamic_object_field")
+        .map(|(&id, _)| id);
+    let Some(dof_module_id) = dof_module_id else {
+        return std::collections::HashSet::new();
+    };
+    let borrow_mut_ids: std::collections::HashSet<FunctionID> = program
+        .functions
+        .iter()
+        .filter(|(_, f)| f.module_id == dof_module_id && f.name == "borrow_mut")
+        .map(|(id, _)| id)
+        .collect();
+    if borrow_mut_ids.is_empty() {
+        return std::collections::HashSet::new();
+    }
+
+    // Collect every (pattern, value) Let binding in the body.
+    let mut lets: Vec<(Vec<TempId>, IRNode)> = Vec::new();
+    collect_let_bindings(body, &mut lets);
+
+    let mut tainted: std::collections::HashSet<TempId> = std::collections::HashSet::new();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for (pattern, value) in &lets {
+            let is_source = value_calls_any(value, &borrow_mut_ids);
+            let refs_tainted = value.all_var_refs().iter().any(|v| tainted.contains(v));
+            if is_source || refs_tainted {
+                for p in pattern {
+                    if p.as_ref() != "_" && tainted.insert(p.clone()) {
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+    tainted
+}
+
+fn collect_let_bindings(node: &IRNode, out: &mut Vec<(Vec<TempId>, IRNode)>) {
+    if let IRNode::Let {
+        pattern,
+        value,
+        body,
+    } = node
+    {
+        out.push((pattern.clone(), (**value).clone()));
+        collect_let_bindings(value, out);
+        collect_let_bindings(body, out);
+    } else {
+        for child in node.iter_children() {
+            collect_let_bindings(child, out);
+        }
+    }
+}
+
+fn value_calls_any(value: &IRNode, ids: &std::collections::HashSet<FunctionID>) -> bool {
+    value.calls().any(|f| ids.contains(&f))
 }

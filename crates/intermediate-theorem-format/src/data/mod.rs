@@ -7,6 +7,7 @@ use std::borrow::Borrow;
 use std::collections::BTreeMap;
 
 use crate::analysis::{collect_imports, fold_constants, order_by_dependencies};
+use crate::data::ir::IRNode;
 use crate::{FunctionID, Type};
 
 pub use structure::StructID;
@@ -345,6 +346,301 @@ pub struct Program {
     /// with `<helper>.loop_entry <args> <hpre> <h>` (a user lemma). See the
     /// loop-invariant entry cascade in `analysis/loop_inv_entry.rs`.
     pub loop_inv_entry_impls: std::collections::HashSet<String>,
+    /// Lean-side termination declarations harvested from the client's
+    /// `Termination/<module>.lean` files (the `def <name>.loop_hyp` / `def
+    /// <name>.precond` headers). Drives `thread_lean_terminations`: a generic,
+    /// name-free replacement for the old per-function `max_heapify`/`derive_gas`
+    /// passes. A recursive helper whose name appears in `loop_hyp` carries the
+    /// `hinv` invariant; `precond` is the client contract that the size/entry
+    /// preconditions propagated to external callers resolve against. Stashed by
+    /// the backend's `pre_finalize` hook before `finalize` runs the threading.
+    pub lean_termination_decls: LeanTerminationDecls,
+    /// IDs of functions threaded by the callee-`requires` entry cascade (they
+    /// gained an `hpre` proof param for a callee's `requires`). A caller that
+    /// cannot supply that precondition forwards an `IRNode::Abort` placeholder in
+    /// the proof slot; the renderer emits `sorry` there (a `Prop` inhabitant)
+    /// rather than the `MoveAbort` value an `Abort` would otherwise render as.
+    /// See `analysis/callee_requires_entry.rs`.
+    pub callee_requires_impls: std::collections::HashSet<FunctionID>,
+    /// IDs of caller functions threaded by the callee-`requires` PRECOND cascade
+    /// (`analysis/callee_requires_precond.rs`). These are `.while_`/`.after_`
+    /// loop helpers or plain value defs / `.aborts` whose call into a
+    /// `callee_requires_impls` callee G passes a `requires`-slot argument that
+    /// references loop-body temps / rebound locals (not the caller's params), so
+    /// no param-typed `hpre` for G can name it. Instead the caller carries a
+    /// client-declared `hpre : <caller-base>.precond <params>`, and at G's call
+    /// site the renderer emits the client `(by <G-namespace>_<G-base>_requires)`
+    /// macro (which discharges G's `requires` from the in-scope precond) rather
+    /// than the bare `sorry` the plain `callee_requires_impls` slot would emit.
+    /// Keyed by ID (NOT name) to avoid the cross-module same-name collision the
+    /// `render.rs:360` warning calls out.
+    pub callee_requires_precond_callers: std::collections::HashSet<FunctionID>,
+    /// `.aborts` functions decomposed into side-car segment chains by
+    /// `analysis/decompose_aborts.rs`: `(aborts_id, seg_1_id)`. The renderer
+    /// emits a `<fn>.aborts.decompose ... := rfl` recomposition lemma for each.
+    pub aborts_decompositions: Vec<(FunctionID, FunctionID)>,
+    /// Obligation bundles (verification-condition form) for oversized
+    /// `.aborts` functions: named leaf obligations plus a generator-built
+    /// structural proof that they imply `.aborts = none`. Produced by
+    /// `analysis/decompose_aborts.rs`; rendered as `<fn>.aborts.ob_k` defs and
+    /// a `<fn>.aborts_none_of` theorem whose proof term mirrors the body.
+    pub aborts_bundles: Vec<AbortsBundle>,
+    /// Obligation bundles for `.ensures` companions (unified-backend design
+    /// §5.1, Phase 3.1): the `.aborts` bundle machinery generalized to the
+    /// ensures spine (Let spine → `&&`/`ite`/Prop-leaf terminals). Produced by
+    /// `analysis/decompose_aborts.rs` under the per-package `ensures_bundles`
+    /// module_options gate; rendered as `<fn>.ensures*.ob_k` defs and a
+    /// `<fn>.ensures*_of` theorem with a generator-built structural proof.
+    pub ensures_bundles: Vec<AbortsBundle>,
+    /// Equation/projection lemma sets for impl defs rendered `@[irreducible]`
+    /// under the per-MODULE `irreducible_defs` module_options gate (unified-
+    /// backend design §5.3, Phase 3.2). Produced by
+    /// `analysis/equation_lemmas.rs`; the renderer suppresses `@[reducible]`
+    /// on member defs, emits the lemma block (each proven at generation time,
+    /// BEFORE the attribute applies), then `attribute [irreducible] <fn>`.
+    pub equation_lemmas: Vec<EquationLemmaSet>,
+    /// Stored-value data-invariant hypotheses threaded onto SPEC functions by
+    /// `analysis/stored_value_invariants.rs` (the assume half of the
+    /// discipline). Like [`fn_proof_params`], a finalize-internal recording
+    /// table drained by `materialize_proof_params` — hdinv params are appended
+    /// AFTER any hpre params so client proof references are stable.
+    pub fn_data_inv_params: std::collections::HashMap<FunctionID, Vec<functions::ProofParam>>,
+    /// Preservation obligations (the assert half): one per (spec fn, slot,
+    /// updated-container result component). Rendered into the Correctness file
+    /// next to the spec's own obligation. Keyed by the `<base>_spec.aborts`
+    /// spec function id.
+    pub data_inv_goals: std::collections::HashMap<FunctionID, Vec<DataInvGoal>>,
+    /// World-mode preservation obligations (unified-backend design §7,
+    /// Phase 5): one per (spec fn, invariant parent source, world-returning
+    /// impl). Concludes `Prover.World.World.allDf ((impl …)<proj>)
+    /// (World.uidNat <parent_expr>) <pred>`. Keyed like [`data_inv_goals`].
+    pub data_inv_world_goals: std::collections::HashMap<FunctionID, Vec<WorldDataInvGoal>>,
+    /// Per-native ghost-marker seed for the upstream spec-global mechanism:
+    /// `(K, V)` marker pairs a ghost-writing native's `#[spec(target=...)]`
+    /// spec declares (K a marker struct type, V the value type). Derived by
+    /// the backend from the Move model (gated to markers some target-package
+    /// spec declares) and handed to `ProgramBuilder`; consumed (drained) by
+    /// `analysis/ghost_threading.rs` in `finalize`. Empty for programs whose
+    /// specs never declare ghost markers — the pass is then a no-op and the
+    /// output is byte-identical.
+    pub ghost_native_seed: BTreeMap<FunctionID, Vec<(Type, Type)>>,
+    /// The threaded ghost-variable sets after `ghost_threading` ran: every
+    /// function (value defs, `.aborts` faces, loop helpers, spec wrappers)
+    /// that transitively reaches a seeded ghost-writing native, mapped to
+    /// the `(K, V)` markers it threads (sorted by marker struct name).
+    /// Kept on `Program` for debugging / downstream inspection.
+    pub ghost_vars: BTreeMap<FunctionID, Vec<(Type, Type)>>,
+    /// IDs of the synthetic `World` module/struct + typed-view natives
+    /// registered by `analysis/world_threading.rs` (Phase A). `Some` exactly
+    /// when the package opted into `world_mode`; the renderer keys the
+    /// `World` type special-case, `Generated/World.lean` emission, the
+    /// `import Generated.World` injection, and DF-universe collection off it.
+    pub world_functions: Option<crate::analysis::world_threading::WorldFunctions>,
+    /// Functions whose mutref return is PAIR-kinded (`Mutable T (S × World)`,
+    /// from heterogeneous-phi unification in `world_threading`). Persisted so
+    /// the caller-side pair-writeback fixup can re-run at the END of finalize:
+    /// the in-threading run rewrites value-nested occurrences that later
+    /// optimize passes revert, so the fixup must have the last word over the
+    /// final body shape.
+    pub pair_mut_fns: std::collections::BTreeSet<FunctionID>,
+    /// Frame-lemma sets (unified-backend design §5.4, Phase 4): per threaded
+    /// value face, the df footprint + generator-built `FrameDf` proof tree.
+    /// Produced by `analysis/frame_lemmas.rs` in world-mode packages only;
+    /// the renderer emits `<fn>.dfFootprint` / `<fn>.frame_thm` /
+    /// `<fn>.frame_df_out` right after the def. Inexpressible shapes are
+    /// dropped LOUDLY at generation (stderr warning naming the function) —
+    /// never emitted unprovable or `sorry`'d.
+    pub frame_lemmas: Vec<crate::analysis::frame_lemmas::FrameLemmaSet>,
+    /// Per-function type-parameter indices that flow into World typed-view
+    /// ops (unified-backend design Phase 5, generic state ops). The renderer
+    /// emits `[HasCode TyCode <tp>]` instance binders for them. Computed by
+    /// `analysis/world_threading::compute_hascode_params`; empty off
+    /// world-mode.
+    pub fn_hascode_params: BTreeMap<FunctionID, std::collections::BTreeSet<u16>>,
+    /// Set by `finalize_for_test`. World-mode frame lemmas (`<fn>.frame_thm` /
+    /// `dfFootprint` / `frame_df_out`) are spec/correctness-proof artifacts the
+    /// per-test drivers never evaluate (they only run each function's `.aborts`
+    /// companion). Suppressing them in test mode avoids compiling frame-proof
+    /// combinator trees whose composition can fail on world-mode wrappers
+    /// (e.g. `staking_pool::process_pending_stakes_and_withdraws` over
+    /// `Table.add`) — unblocking the world-mode test build without affecting
+    /// what the drivers execute.
+    pub for_test: bool,
+    /// Per-function type-param indices that flow (bare or nested) into a
+    /// heterogeneous-`bag` / `object_bag` op, directly or transitively. These
+    /// need a `[HasCode BagU <tp>]` instance binder so the bag op's `HasCode`
+    /// constraint on a generic value type (e.g. `Bag.borrow (Balance T)`)
+    /// discharges via the `Generated/BagUInterp` wrapper instance. The `bag`
+    /// universe (`BagU`) is separate from the World/df universe (`TyCode`) — a
+    /// param may need both binders. Computed by
+    /// `analysis/world_threading::compute_bagu_params`.
+    pub fn_bagu_params: BTreeMap<FunctionID, std::collections::BTreeSet<u16>>,
+}
+
+/// One generated `_data_inv` preservation-goal theorem. All the expression
+/// pieces are pre-built over the SPEC function's value-parameter names (the
+/// same binders the Correctness obligation uses), so the renderer only
+/// formats text. See `analysis/stored_value_invariants.rs`.
+#[derive(Debug, Clone)]
+pub struct DataInvGoal {
+    /// Suffix distinguishing multiple goals per spec (`""`, `"_1"`, ...).
+    pub goal_suffix: String,
+    /// The impl VALUE function whose result must preserve the invariant.
+    pub impl_fn_id: FunctionID,
+    /// Number of leading spec value-parameter names to apply the impl to
+    /// (the impl's value arity — dead-param elimination can drop trailing
+    /// spec params such as `ctx`).
+    pub n_args: usize,
+    /// Tuple-projection text applied to the impl application (`""`, `".2"`, ...).
+    pub proj_expr: String,
+    /// Field path from the projected component to the ghost map, including the
+    /// leading dot (e.g. `.validators.validator_candidates.dynamic_fields`).
+    pub map_tail: String,
+    pub key_type: Type,
+    pub value_type: Type,
+    pub pred: String,
+}
+
+/// One generated world-mode `_data_inv` preservation-goal theorem
+/// (unified-backend design §7, Phase 5). Stated over the SPEC function's
+/// binder names, concluding that the impl's RESULT WORLD still satisfies
+/// `allDf` at the invariant's parent uid.
+#[derive(Debug, Clone)]
+pub struct WorldDataInvGoal {
+    /// Suffix distinguishing multiple goals per spec (`""`, `"_1"`, ...).
+    pub goal_suffix: String,
+    /// The impl VALUE function whose result world must preserve the invariant.
+    pub impl_fn_id: FunctionID,
+    /// Number of leading spec value-parameter names to apply the impl to
+    /// (includes the trailing `__world`).
+    pub n_args: usize,
+    /// Projection from the impl result to its world component (`""` when the
+    /// result IS the world, `".2"` for the augmented pair).
+    pub world_proj: String,
+    /// The parent-uid expression over the spec's value params
+    /// (e.g. `(c.id)`), wrapped by the renderer in `World.uidNat`.
+    pub parent_expr: String,
+    pub pred: String,
+}
+
+/// One leaf verification condition of an `.aborts` obligation bundle.
+#[derive(Debug, Clone)]
+pub struct AbortsObligation {
+    /// Short name (`ob_<k>`); rendered as `<fn>.aborts.ob_<k>`.
+    pub name: String,
+    /// Typed parameters (a subset of the parent's value parameters).
+    pub parameters: Vec<crate::data::functions::Parameter>,
+    /// Path conditions guarding the check: `(bool_expr, required_polarity)`.
+    /// Rendered as `<expr> = true → …` / `<expr> = false → …` premises.
+    pub path: Vec<(IRNode, bool)>,
+    /// The check itself.
+    pub leaf: AbortsLeaf,
+}
+
+/// The conclusion shape of an obligation.
+#[derive(Debug, Clone)]
+pub enum AbortsLeaf {
+    /// A boolean abort guard that must be false: `<expr> = false`.
+    GuardFalse(IRNode),
+    /// A boolean guard that must be true (abort sits on the else side).
+    GuardTrue(IRNode),
+    /// An `Option MoveAbort` expression that must be `none` (callee aborts,
+    /// or an opaque segment covering a subtree the fine-grained walk skips).
+    OptionNone(IRNode),
+    /// A Prop-typed expression that must hold (ensures-bundle leaves: the
+    /// expression renders directly as the obligation's conclusion — `ToProp`
+    /// already renders `(e) = true`, quantifiers render `spec_forall …`, an
+    /// opaque Prop segment renders as its call).
+    PropHolds(IRNode),
+    /// Requires-slot leaf (unified-backend design §5.2, deferred item 2.2,
+    /// behind the `requires_leaves` gate): the callee's declared `requires`
+    /// hypothesis instantiated at this call site — the renderer substitutes
+    /// the callee's param names in its verbatim proof-param type with the
+    /// rendered `args`. Paired with [`AbortsLeaf::CalleeNoneUnderRequires`]
+    /// via [`AbortsProofNode::RequiresApp`].
+    RequiresHolds {
+        callee: FunctionID,
+        args: Vec<IRNode>,
+    },
+    /// The callee-aborts leaf under the requires hypothesis:
+    /// `∀ (hpre__ : <requires instance>), callee.aborts args hpre__ = none`.
+    /// Recomposition against the body's `sorry`-slotted call is definitional
+    /// by proof irrelevance.
+    CalleeNoneUnderRequires {
+        callee: FunctionID,
+        args: Vec<IRNode>,
+    },
+}
+
+/// Structural recomposition proof, mirroring the `.aborts` body. Rendered as
+/// a direct term over the `MoveAbort.*_none_*` prelude combinators.
+#[derive(Debug, Clone)]
+pub enum AbortsProofNode {
+    /// The expression is literally (or definitionally) `Option.none`.
+    Rfl,
+    /// `MoveAbort.orElse_none_of <left> <right>`.
+    OrElse(Box<AbortsProofNode>, Box<AbortsProofNode>),
+    /// `MoveAbort.bite_none_of_false (h_ob …) <rest>` — abort guard is false.
+    GuardFalse {
+        ob: usize,
+        rest: Box<AbortsProofNode>,
+    },
+    /// `MoveAbort.bite_none_of_true (h_ob …) <rest>` — abort on the else side.
+    GuardTrue {
+        ob: usize,
+        rest: Box<AbortsProofNode>,
+    },
+    /// `MoveAbort.bite_none_split (fun hb<d> => <then>) (fun hb<d> => <else>)`.
+    BIte(Box<AbortsProofNode>, Box<AbortsProofNode>),
+    /// `MoveAbort.bdite_none_split …` — dependent `if h : (c) = true` branch.
+    DIte(Box<AbortsProofNode>, Box<AbortsProofNode>),
+    /// `h_ob <path binders>` — the obligation is the whole sub-proof.
+    Leaf { ob: usize },
+    /// `SpecEnsures.and_of <left> <right>` — ensures-bundle split of a
+    /// Bool conjunction terminal `(a && b) = true`.
+    AndBool(Box<AbortsProofNode>, Box<AbortsProofNode>),
+    /// `SpecEnsures.ite_of (fun hb<d> => <then>) (fun hb<d> => <else>)` —
+    /// ensures-bundle split of a Prop-branched `if (c : Bool) then P else Q`.
+    PIte(Box<AbortsProofNode>, Box<AbortsProofNode>),
+    /// `SpecEnsures.bite_eq_true_of …` — ensures-bundle split of a Bool ite
+    /// under `= true`: `(if c then a else b) = true`.
+    BIteBool(Box<AbortsProofNode>, Box<AbortsProofNode>),
+    /// `h_ob_<call> hb… (h_ob_<req> hb…)` — the requires-slot pair (§5.2,
+    /// `requires_leaves` gate): the precondition leaf feeds the ∀-bound
+    /// callee-aborts leaf; proof irrelevance closes the defeq against the
+    /// body's placeholder slot.
+    RequiresApp { req_ob: usize, call_ob: usize },
+}
+
+/// A complete obligation bundle for one `.aborts` function.
+#[derive(Debug, Clone)]
+pub struct AbortsBundle {
+    pub fn_id: FunctionID,
+    pub obligations: Vec<AbortsObligation>,
+    pub proof: AbortsProofNode,
+}
+
+/// Equation/projection lemmas for one impl def rendered `@[irreducible]`
+/// under the `irreducible_defs` gate (unified-backend design §5.3). All
+/// expressions are let-substituted (projection-folded) forms closed over the
+/// function's own parameters, so the lemma statements never mention body
+/// temps. Lemma names deviate from the doc's `F.eq_1`/`F.eq_b`: Lean reserves
+/// the autogenerated `<fn>.eq_<n>`/`<fn>.eq_def` equation-lemma namespace, so
+/// the generator emits `<fn>.eq_body` / `<fn>.eq_then` / `<fn>.eq_else` /
+/// `<fn>.result_<k>` instead.
+#[derive(Debug, Clone)]
+pub struct EquationLemmaSet {
+    pub fn_id: FunctionID,
+    /// Whether the whole-body `<fn>.eq_body : <fn> args = <body> := rfl`
+    /// lemma is emitted (suppressed for oversized bodies).
+    pub unfold: bool,
+    /// Terminal-`if` branch lemmas: `(cond', then', else')` — rendered as
+    /// `<fn>.eq_then (h : cond' = true) : <fn> args = then'` and the `eq_else`
+    /// dual, proven via the `SpecEnsures.ite_then/ite_else` prelude lemmas.
+    pub branches: Option<(IRNode, IRNode, IRNode)>,
+    /// Tuple-result projection lemmas: `(component index, component expr)` —
+    /// rendered as `<fn>.result_<k+1> : (<fn> args)<proj> = expr := rfl`.
+    pub projections: Vec<(usize, IRNode)>,
 }
 
 /// A loop-invariant hypothesis parameter injected onto a `while_*`/`after_*`
@@ -358,6 +654,36 @@ pub struct LoopInvHyp {
     pub hook_name: String,
 }
 
+/// Lean-declared termination hooks scanned from `Termination/<module>.lean`.
+/// `loop_hyp` holds the names of functions for which the client wrote a
+/// `def <name>.loop_hyp` (so the generated helper should carry an `hinv` typed
+/// by it); `precond` holds the names for which a `def <name>.precond` exists
+/// (the entry/size precondition threaded onto external callers of a loop helper).
+#[derive(Debug, Clone, Default)]
+pub struct LeanTerminationDecls {
+    pub loop_hyp: std::collections::HashSet<String>,
+    pub precond: std::collections::HashSet<String>,
+    /// Full names of loop helpers for which the client provides a Lean
+    /// termination measure (`def <name>.termination`). Such a loop renders with
+    /// the real `termination_by <name>.termination` / decreasing macro instead
+    /// of the `sorry` default, so its per-iteration body must stay inline for
+    /// the decreasing proof to see the loop variable's progress — loop-body
+    /// extraction must skip it.
+    pub termination: std::collections::HashSet<String>,
+    /// Stems of client `def <stem>.data_inv` stored-value invariant
+    /// declarations (`<Module>.<Struct>` type-wide, or
+    /// `<Module>.<Struct>.<field>` slot-scoped). Scanned from the same
+    /// `sources/lean/**/*.lean` sweep as the termination hooks; consumed by
+    /// `analysis/stored_value_invariants.rs`.
+    pub data_inv: std::collections::BTreeSet<String>,
+    /// Per-module option gates from `def <Module>.module_options` hook
+    /// declarations (`<stem> → {quoted option strings on the decl line}`).
+    /// Currently consumed for the per-package `world_mode` gate
+    /// (`analysis/world_threading.rs`); the unified-backend design (§8) adds
+    /// `honest_df_aborts` / `irreducible_defs` / … on the same surface.
+    pub module_options: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+}
+
 impl Program {
     pub fn finalize(&mut self) {
         self.finalize_with_mode(BuildMode::Spec)
@@ -369,17 +695,34 @@ impl Program {
     /// `BuildMode::Test` (preserves `#[test]` items and inline
     /// `IRNode::Abort`s), which is why the Test path routes here.
     pub fn finalize_for_test(&mut self) {
+        self.for_test = true;
         self.finalize_with_mode(BuildMode::Spec);
     }
 
     pub fn finalize_with_mode(&mut self, mode: BuildMode) {
         order_by_dependencies(self);
 
-        crate::analysis::dynamic_field_rewriting::rewrite_df_borrow_mut_pre_threading(self);
+        // World-mode (unified-backend design Phase 1): the per-package
+        // `world_mode` gate selects the World lowering (Phase A here, the
+        // interprocedural Phase B in ghost_threading's slot below) and skips
+        // BOTH dynamic_field_rewriting phases — Phase A produces the same
+        // MutableBorrow bracketing shape for `thread_mutables` that
+        // `rewrite_df_borrow_mut_pre_threading` produces today, with
+        // `__world` as the reconstructed parent. Gate off ⇒ both calls
+        // return on their first line and the slot-mode passes run unchanged
+        // (byte-identical output).
+        let world_mode = crate::analysis::world_threading::world_mode_enabled(self);
+        if world_mode {
+            crate::analysis::world_threading::lower_state_ops_pre_threading(self);
+        } else {
+            crate::analysis::dynamic_field_rewriting::rewrite_df_borrow_mut_pre_threading(self);
+        }
 
         crate::analysis::mutable_threading::thread_mutables(self);
 
-        crate::analysis::dynamic_field_rewriting::rewrite_dynamic_fields(self);
+        if !world_mode {
+            crate::analysis::dynamic_field_rewriting::rewrite_dynamic_fields(self);
+        }
 
         // Fix `Let { pattern: [], value: WriteRef { reference: Var(X) } }`
         // by binding the WriteRef to X. Lean's `Mutable.set` is pure;
@@ -432,6 +775,51 @@ impl Program {
             self.functions.get_mut(func_id).body =
                 crate::analysis::coalesce_shadow_self_noop_updates(body);
         }
+
+        // Model the stateful `sui::tx_context` VM natives (`fresh_id` /
+        // `native_sender`) from the threaded `TxContext` struct fields so
+        // world-mode object identity is faithful: distinct fresh uids
+        // (`derive_id ctx.tx_hash ctx.ids_created`, incrementing `ids_created`)
+        // and a real `sender` (`self.sender`). Runs after `thread_mutables`
+        // (so `fresh_object_address` already returns `(address, TxContext)`)
+        // and before `dead_param_elimination` (so `sender`'s `self` survives).
+        // No-op off world_mode.
+        if world_mode {
+            crate::analysis::tx_context_natives::model_tx_context_natives(self);
+        }
+
+        // Ghost threading (spec-global markers): thread each declared
+        // `(K, V)` ghost marker as a `__ghost_<K>` value param + trailing
+        // return slot through the transitive caller cone of the seeded
+        // ghost-writing natives, then lower `ghost::global/set/borrow_mut`
+        // onto the threaded vars. Runs AFTER mutable threading (so the
+        // shapes it appends extend the already-augmented return tuples and
+        // spec preambles later pick up the rebinds) and BEFORE the aborts
+        // derivation + spec extraction below (so `.aborts` bodies derived
+        // from threaded impl bodies see consistent call shapes, and
+        // extracted `.ensures` carry the ghost params + rebinds). No-op
+        // when `ghost_native_seed` is empty (inertness gate).
+        // World-mode transfer-ghost retirement: lower `ghost::global` reads
+        // on the transfer markers onto the World transfer-marker slots BEFORE
+        // ghost threading, so world-mode user spec faces carry no `__ghost_*`
+        // binders (the ghost cone shrinks to the transfer modules themselves).
+        // No-op unless world_mode (inertness gate).
+        crate::analysis::world_threading::lower_transfer_ghosts(self);
+
+        crate::analysis::ghost_threading::thread_ghosts(self);
+
+        // World threading Phase B (unified-backend design §4.1): the
+        // interprocedural half of world-mode. Runs in the same slot family
+        // as ghost threading — AFTER mutable threading + its fixups (the
+        // call shapes it appends extend the mut-augmented tuples) and
+        // BEFORE the aborts derivation + spec extraction below (so callee
+        // `.aborts` faces and extracted spec companions carry the `__world`
+        // param). Spec-only ghost slots, when both mechanisms are active,
+        // are ordered before `__world` by pass order (ghost_threading runs
+        // first); the doc's world-first ordering applies once transfer
+        // ghost seeding is retired in world-mode packages. No-op unless
+        // `world_mode` seeded `Program::world_functions` (inertness gate).
+        crate::analysis::world_threading::thread_world(self);
 
         // The next four passes are Spec-only: they shape `.aborts`
         // companions, extract requires/ensures specs out of bodies, and
@@ -496,6 +884,31 @@ impl Program {
 
         collect_imports(self);
         self.optimize_all(mode);
+
+        // Fix `wrap_tail`'s discarded-reconstruct anti-pattern
+        // (`let P := (let () := WriteBack{parent:P}; P)`), which drops the
+        // receiver reconstruction when `self` is mutated through a
+        // mutref-returning helper's result (sui-system
+        // `validator_set::request_add_stake`: the staked validator never lands
+        // back in `self.active_validators`). Runs after `optimize_all`, which
+        // is what materializes the wrapped shape.
+        //
+        // Gated off in world-mode: there `thread_world` (which ran earlier)
+        // has already threaded a `__world` out of the tail, and a receiver
+        // borrowed through a heterogeneous phi (`get_candidate_or_active_
+        // validator_mut`: candidate = World-df-backed, active = value-backed)
+        // has a WORLD-PAIRED `Mutable.apply` (state `S × World`). Rebinding
+        // `let self := Mutable.apply child` there mistypes `self` as the pair.
+        // Keeping the world-safe discarded form is the documented M1
+        // heterogeneous-phi cut; the World-store transfer/take path (what the
+        // inventory tests need) is unaffected.
+        if !world_mode {
+            for func_id in self.functions.iter_ids().collect::<Vec<_>>() {
+                let body = std::mem::take(&mut self.functions.get_mut(func_id).body);
+                self.functions.get_mut(func_id).body =
+                    crate::analysis::fix_discarded_reconstruct_writebacks(body);
+            }
+        }
 
         // A pure quantifier never aborts, so replace `forall!`/`exists!` in
         // `.aborts` companions with `false` — keeps abort bodies computable Bool
@@ -572,6 +985,41 @@ impl Program {
             self.functions.get_mut(func_id).body = new_body;
         }
 
+        // Re-run Inhabited elimination on `.aborts` bodies. A discarded value
+        // computation that bottoms out in the module's nullary `default()`
+        // function (rendered as Lean's `default` / `Inhabited.default`) survives
+        // into the nested match-on-aborts shape — `let tmp := default; Option.none`
+        // or `let tmp := (if c then <typed> else default); Option.none` — where the
+        // bound temp is unused, so its type is unconstrained and Lean gets stuck
+        // synthesizing `Inhabited ?m`. The `default` here is a `Call` to the
+        // empty-tuple `default` function, NOT an `IRNode::Inhabited`, so first
+        // rewrite those calls to `Inhabited`, then flatten any let-value that now
+        // contains one to `false` (giving the discarded binding a concrete type).
+        // Runs after `compose_callee_aborts` / `optimize_all`, which materialize
+        // this shape. Idempotent on bodies with no such default.
+        let default_fn_ids: std::collections::HashSet<usize> = self
+            .functions
+            .iter()
+            .filter(|(_, f)| {
+                f.name == "default" && matches!(&f.body, crate::IRNode::Tuple(v) if v.is_empty())
+            })
+            .map(|(id, _)| id)
+            .collect();
+        for func_id in self.functions.iter_ids().collect::<Vec<_>>() {
+            if !self.functions.get(&func_id).name.ends_with(".aborts") {
+                continue;
+            }
+            let body = std::mem::take(&mut self.functions.get_mut(func_id).body);
+            let body = body.map(&mut |n| match n {
+                crate::IRNode::Call { function, .. } if default_fn_ids.contains(&function) => {
+                    crate::IRNode::Inhabited
+                }
+                other => other,
+            });
+            self.functions.get_mut(func_id).body =
+                crate::analysis::replace_inhabited_let_values(body);
+        }
+
         // Loop-invariant entry cascade: thread the precondition hypothesis onto
         // loop_inv target impls + their spec references so the entry call can be
         // discharged (vs `sorry`d). Runs after dead-param elimination so the
@@ -579,12 +1027,147 @@ impl Program {
         // loop helper / impl.
         crate::analysis::thread_loop_inv_entry(self);
 
+        // Callee-`requires` entry cascade: thread a precondition hypothesis onto
+        // plain value defs / `.aborts` (e.g. the `Validator.pool_token_exchange_rate_at_epoch`
+        // wrapper, and `frozen_after_deactivation_spec.aborts`) that call a
+        // loop-inv entry impl carrying a `requires`, so the call site forwards a
+        // real `hpre` instead of the `<G>_requires` sorry macro. Runs after the
+        // loop-inv entry cascade (which populates `loop_inv_entry_impls`, the set
+        // this pass keys off) and before `materialize_proof_params`.
+        crate::analysis::thread_callee_requires_entry(self);
+
+        // Callee-`requires` PRECOND cascade: for the cases the param-forwarding
+        // pass above could not thread — `.while_`/`.after_` loop helpers and
+        // plain defs / `.aborts` whose call into a `callee_requires_impls` callee
+        // passes a `requires`-slot arg over loop-body temps / rebound locals — a
+        // client-declared `<F-base>.precond` is threaded onto F (and propagated up
+        // its caller chain to the spec boundary) so the call site renders the
+        // client `(by <G>_requires)` macro instead of bare `sorry`. Inert unless
+        // the client declared a `.precond` (scanned into `lean_termination_decls`)
+        // for such an F. Runs right after the param-forwarding pass (so it sees
+        // the final `callee_requires_impls` set) and before
+        // `materialize_proof_params`.
+        crate::analysis::thread_callee_requires_precond(self);
+
+        // Nested-loop termination: detect the three-member `while_0`/`while_1`/
+        // `while_1.after` shape and thread the outer guard `i < n` onto the
+        // inner members so their lexicographic decreasing proof closes. Runs
+        // after the entry cascade (so it never feeds synthetic loops into the
+        // hpre threading) and before `materialize_proof_params` (which drains
+        // the `hinv` recordings into signatures).
+        crate::analysis::thread_nested_loop_termination(self);
+
+        // Generic loop-termination threading driven by the client's Lean
+        // `Termination/<module>.lean` declarations (`def <name>.loop_hyp` /
+        // `def <name>.precond`, scanned into `lean_termination_decls`). Threads
+        // `hinv` onto a declared self-recursive helper and propagates the entry
+        // precond to its external callers — the name-free replacement for the old
+        // hard-coded `max_heapify` / `derive_gas` passes. Same placement
+        // contract: after the entry cascade, before materialize_proof_params.
+        crate::analysis::thread_lean_terminations(self);
+
+        // Stored-value data invariants: for each client `def <stem>.data_inv`
+        // declaration, thread a membership-conditioned container hypothesis
+        // (`hdinv : TypedMap.all K V P (path.dynamic_fields)`) onto the spec
+        // functions whose impl closure touches the declared slot, and record
+        // the `_data_inv` preservation goals the Correctness renderer emits.
+        // Inert (byte-identical output) without declarations. Runs before
+        // `materialize_proof_params`, which drains the recordings.
+        crate::analysis::thread_stored_value_invariants(self);
+
         // Materialize proof parameters into signatures. MUST be the final step:
         // it reads the now-final value-param lists and the entry-cascade
         // recordings, then writes each function's `signature.proof_params` — the
         // single source of truth that the validator (scope + arity) and the
         // renderer both consume. Nothing after this may reorder parameters.
         self.materialize_proof_params();
+
+        // Side-car decomposition of oversized `.aborts` bodies into
+        // `<fn>.aborts.seg_k` chains (bodies untouched; proofs opt in via the
+        // rendered `.decompose` rfl lemma). Runs after
+        // `materialize_proof_params` so copied `hpre` binders are final.
+        // Under the per-package `contract_aborts` module_options gate
+        // (unified-backend design §5.1/§5.2, Phase 2), obligation bundles
+        // additionally become the default interface for small `.aborts`:
+        // ≥ 2-leaf bundles fire below MIN_TOTAL, and leaf-free (total)
+        // bundles render their `aborts_none_of` tagged `@[contract]` for the
+        // callee-contract registry. Inert without the gate.
+        crate::analysis::decompose_aborts(self);
+
+        // Ensures bundles (unified-backend design §5.1, Phase 3.1): the same
+        // machinery generalized to `.ensures` companions, behind the
+        // per-package `ensures_bundles` module_options gate. First-line
+        // inertness return when the gate is off.
+        crate::analysis::decompose_ensures(self);
+
+        // Equation/projection lemma sets for the per-MODULE `irreducible_defs`
+        // gate (§5.3, Phase 3.2). Pure recording pass — bodies untouched; the
+        // renderer emits the lemmas + `attribute [irreducible]` lines. Inert
+        // when no module opts in.
+        crate::analysis::compute_equation_lemmas(self);
+
+        // HasCode-requirement analysis (Phase 5, generic state ops): record
+        // which type params of each function flow into World typed-view ops;
+        // the renderer emits `[HasCode TyCode <tp>]` binders for them. Runs
+        // after every derived face exists and BEFORE frame lemmas (which
+        // admit generic candidates only when fully HasCode-covered). Inert
+        // off world-mode.
+        crate::analysis::world_threading::compute_hascode_params(self);
+        // BagU analog: which type params flow into `bag`/`object_bag` ops; the
+        // renderer emits `[HasCode BagU <tp>]` binders for them. Separate
+        // universe from the World/TyCode threading above.
+        crate::analysis::world_threading::compute_bagu_params(self);
+
+        // Frame lemmas (§5.4, Phase 4): footprints + generator-built FrameDf
+        // proof trees for world-mode value faces. Pure recording pass over
+        // FINAL bodies (value faces are untouched by the decompose passes
+        // above). First-line inertness return unless `world_mode` seeded
+        // `Program::world_functions`. Skipped in test mode — the drivers only
+        // evaluate `.aborts`, never the frame proofs.
+        if !self.for_test {
+            crate::analysis::compute_frame_lemmas(self);
+        }
+
+        // Loop-body extraction: hoist a heavy per-iteration body out of a
+        // self-recursive `<f>.while_N` helper into a sibling non-recursive
+        // `<f>.while_N.step` def. Lean's well-founded-recursion elaboration
+        // (fixpoint + equational-lemma generation) scales with the recursive
+        // body's term size, so a heavy loop body hangs type-check AND `lean -c`
+        // codegen for minutes/GB (sui-system `Voting_power_tests`). Shrinking
+        // the WF body to a guard + one `step` call + the recursive call fixes
+        // it while keeping a real (sorry-terminated but unfoldable) `def`.
+        // Semantics-preserving; only touches value-form non-generic sorry-
+        // fallback loops of the canonical shape (see the pass docstring).
+        //
+        // Runs LAST — after every body-shaping pass — so it reads each loop's
+        // FINAL body (e.g. the writeback rebind `let ctx := __mut_ret_N` that
+        // later passes materialize is present, so the threaded value is captured
+        // as a live-out of the step helper). The new `.step` helpers are plain
+        // value defs needing no proof params / lemmas; the renderer's per-module
+        // topological sort places each ahead of its loop's mutual block.
+        // Inline calls to abort-only `<while>.after` loop-continuation helpers.
+        // Such a helper's body is a bare `abort` (the Move loop falls through to
+        // `abort`), so the demotion in `mutable_threading` strips the Mutable
+        // wrapper off its return type while its `<while>` sibling keeps it
+        // (its found-branch has a real `Mutable.compose`) — leaving the sibling's
+        // tail `let r := <while>.after …; (r.1, …)` expecting `Mutable` from a
+        // `.after` typed plain ("Application type mismatch", cetus
+        // `borrow_mut_rewarder`). Since the call always aborts, replace it (and
+        // the now-unreachable destructure that follows) with an inline `Abort`,
+        // which Lean unifies with the found-branch's inferred `Mutable` type — no
+        // annotation, no unreliable state placeholder. Runs before
+        // `extract_loop_bodies` so the loop's final body is the inlined form.
+        crate::analysis::inline_abort_only_after_calls(self);
+
+        // Re-run the pair-writeback fixup over FINAL bodies (world-mode only;
+        // inert when `pair_mut_fns` is empty). The threading-time run rewrites
+        // value-nested pair writebacks, but later optimize passes can revert
+        // those, leaving the discarded `let _ := Mutable.apply m; let self :=
+        // self` shape that drops the mutated pair state (sui-system
+        // `Validator_set.request_add_stake` losing candidate stake). Idempotent.
+        crate::analysis::world_threading::run_pair_writeback_fixup(self);
+
+        crate::analysis::extract_loop_bodies(self);
 
         // Enforce the no-opaque-fallback invariant: every `forall!`/`exists!`
         // must have ended up in a `Prop` position. A quantifier still stuck in
@@ -645,6 +1228,22 @@ impl Program {
                         param_type: ProofParamType::Verbatim(prop),
                     });
             }
+        }
+
+        // `hdinv` — stored-value data-invariant hypotheses. Appended after any
+        // `hpre` so binder order is stable (`hpre` first, `hdinv_*` after).
+        let mut hdinv: Vec<(FunctionID, Vec<ProofParam>)> = self
+            .fn_data_inv_params
+            .iter()
+            .map(|(id, v)| (*id, v.clone()))
+            .collect();
+        hdinv.sort_by_key(|(id, _)| *id);
+        for (id, params) in hdinv {
+            self.functions
+                .get_mut(id)
+                .signature
+                .proof_params
+                .extend(params);
         }
     }
 

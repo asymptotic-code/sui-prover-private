@@ -31,6 +31,23 @@ pub struct ProgramBuilder<'env> {
     raw_df_pairs:
         std::collections::HashMap<MoveType, std::collections::BTreeSet<(MoveType, MoveType)>>,
     mode: BuildMode,
+    /// Move-level per-native ghost-marker seed (`(K, V)` pairs each
+    /// ghost-writing native's spec declares), handed in by the backend via
+    /// [`Self::with_ghost_native_seed`]. Converted to IR types at the end
+    /// of `build_inner` into `Program::ghost_native_seed`, which the
+    /// `ghost_threading` finalize pass consumes. Empty = inert.
+    ghost_native_seed: Vec<(QualifiedId<FunId>, Vec<(MoveType, MoveType)>)>,
+    /// Stems of the client-provided `def <stem>.loop_hyp` declarations (from
+    /// `sources/lean/Termination/`), handed in by the backend via
+    /// [`Self::with_loop_hyp_decls`]. A Move `#[spec_only(loop_inv(...))]`
+    /// target's loop machinery (the `hinv` hypothesis param, the user-measure
+    /// `termination_by`, the entry/precond cascade) is only emitted when the
+    /// client actually shipped a matching `loop_hyp` — the generator never
+    /// synthesizes those defs. Without this gate a `loop_inv` annotation alone
+    /// produces dangling references to `<loop>.loop_hyp` / `<spec>.requires` /
+    /// the termination macros. Empty = no client loop_hyps (all `loop_inv`
+    /// loops fall back to the plain `sorry`-termination default).
+    loop_hyp_decls: std::collections::HashSet<String>,
 }
 
 impl<'env> ProgramBuilder<'env> {
@@ -41,7 +58,27 @@ impl<'env> ProgramBuilder<'env> {
             program: Program::default(),
             dynamic_field_info: None,
             mode: BuildMode::Spec,
+            ghost_native_seed: Vec::new(),
+            loop_hyp_decls: std::collections::HashSet::new(),
         }
+    }
+
+    /// Supply the client-provided `loop_hyp` declaration stems (see the field
+    /// docs). Gates loop-invariant registration so `loop_inv`-annotated loops
+    /// without matching client Lean support degrade to the plain loop instead
+    /// of emitting dangling references.
+    pub fn with_loop_hyp_decls(mut self, decls: std::collections::HashSet<String>) -> Self {
+        self.loop_hyp_decls = decls;
+        self
+    }
+
+    /// Supply the Move-level ghost-native seed (see the field docs).
+    pub fn with_ghost_native_seed(
+        mut self,
+        seed: Vec<(QualifiedId<FunId>, Vec<(MoveType, MoveType)>)>,
+    ) -> Self {
+        self.ghost_native_seed = seed;
+        self
     }
 
     pub fn env(&self) -> &GlobalEnv {
@@ -142,6 +179,7 @@ impl<'env> ProgramBuilder<'env> {
                 is_native: true,
                 mutual_group_id: None,
                 test_expectation: None,
+                is_uninterpreted: false,
             },
         );
     }
@@ -259,11 +297,33 @@ impl<'env> ProgramBuilder<'env> {
                 // loop_inv functions are `#[spec_only]` and have no Baseline
                 // target, so do NOT gate on get_target_opt here.
                 if let Some(target_name) = loop_inv_target_name(&func_env) {
-                    let inv_id = self
-                        .program
-                        .functions
-                        .id_for_key(func_env.get_qualified_id());
-                    self.program.loop_invariants.insert(target_name, inv_id);
+                    // Only honor the `loop_inv` annotation when the client
+                    // actually shipped a `def <target>.while_*.loop_hyp` (the
+                    // generator never synthesizes the loop_hyp/termination
+                    // machinery). Without a matching client decl, registering
+                    // the invariant would emit dangling references to
+                    // `<loop>.loop_hyp` / `<target>_spec.requires` / the
+                    // termination macros; instead we skip registration so the
+                    // loop renders as a plain recursive helper with the default
+                    // `sorry`-termination, exactly like an unannotated loop.
+                    let prefix = format!("{}.while_", target_name);
+                    let has_client_loop_hyp =
+                        self.loop_hyp_decls.iter().any(|s| s.starts_with(&prefix));
+                    if has_client_loop_hyp {
+                        let inv_id = self
+                            .program
+                            .functions
+                            .id_for_key(func_env.get_qualified_id());
+                        self.program.loop_invariants.insert(target_name, inv_id);
+                    } else {
+                        eprintln!(
+                            "⚠️  loop_inv on `{}`: no client `sources/lean/Termination/` \
+                             `loop_hyp` shipped — loop falls back to sorry-termination \
+                             (annotation is inert; provide `def {}.while_0.loop_hyp` + \
+                             termination measure to activate it)",
+                            target_name, target_name
+                        );
+                    }
                 }
             }
         }
@@ -285,6 +345,24 @@ impl<'env> ProgramBuilder<'env> {
                 {
                     self.create_function(target);
                 }
+            }
+        }
+
+        // Convert the Move-level ghost-native seed into IR types. Done
+        // after translation so seeded natives that were translated keep
+        // their real IDs; pruned ones get an opaque native stub via
+        // `function_id`. Marker structs are interned by `convert_type`.
+        let seed = std::mem::take(&mut self.ghost_native_seed);
+        for (native_qid, pairs) in seed {
+            let fid = self.function_id(native_qid);
+            let mut markers: Vec<(Type, Type)> = Vec::with_capacity(pairs.len());
+            for (k, v) in &pairs {
+                let k_ir = self.convert_type(k);
+                let v_ir = self.convert_type(v);
+                markers.push((k_ir, v_ir));
+            }
+            if !markers.is_empty() {
+                self.program.ghost_native_seed.insert(fid, markers);
             }
         }
     }

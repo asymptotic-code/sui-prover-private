@@ -4,7 +4,10 @@
 //! Renders complete Program to Lean files.
 //! Dumb renderer — one file per module, each function rendered in order.
 
-use super::function_renderer::{must_skip_function, render_function};
+use super::function_renderer::{
+    must_skip_function, render_aborts_bundles, render_decompose_theorems, render_ensures_bundles,
+    render_equation_lemmas, render_frame_lemmas, render_function,
+};
 use super::lean_writer::LeanWriter;
 use super::struct_renderer::render_struct;
 use crate::{copy_if_changed, escape, write_if_changed, WrittenFiles};
@@ -177,6 +180,19 @@ pub fn get_namespace(program: &Program, module_id: usize) -> String {
 /// layering acyclic — in particular a bag-free skeleton (which, by the
 /// transitive bag-taint invariant in `collect_bag_containing_struct_ids`, only
 /// ever references bag-free structs) resolves its deps to other skeletons /
+/// Whether a user hook file exists for `stem`: the legacy
+/// `Termination/<stem>.lean` path or the unified `Hooks/<stem>.lean` surface
+/// (unified-backend design §8). Either forces the `_types` split and the
+/// matching import on the module file. Returns `(termination, hooks)`.
+fn user_hook_files(termination_dir: &Path, stem: &str) -> (bool, bool) {
+    let term = termination_dir.join(format!("{}.lean", stem)).exists();
+    let hooks = termination_dir
+        .parent()
+        .map(|p| p.join("Hooks").join(format!("{}.lean", stem)).exists())
+        .unwrap_or(false);
+    (term, hooks)
+}
+
 /// non-bag type files and never to a `TyCodeInterp`-importing module file.
 /// Returns `None` when the struct is defined in the current file (same stem).
 #[allow(clippy::too_many_arguments)]
@@ -184,11 +200,12 @@ fn struct_defining_import(
     program: &Program,
     struct_id: StructID,
     current_stem: &str,
-    output_dir: &Path,
+    termination_dir: &Path,
     module_to_file: &HashMap<ModuleID, (String, String)>,
     bag_ids: &HashSet<StructID>,
     bag_stems: &HashSet<String>,
     tci_stems: &HashSet<String>,
+    native_struct_keys: &HashSet<(ModuleID, String)>,
 ) -> Option<String> {
     if !program.structs.has(struct_id) {
         return None;
@@ -208,6 +225,19 @@ fn struct_defining_import(
         let stem = get_namespace_file_stem(program, mid);
         return Some(format!("import {}.{}Natives", pkg, stem));
     }
+    // A NATIVE STRUCT of an otherwise-non-native module also lives in the
+    // `*Natives` file, not in any generated `_types` split. The `_types`/skeleton
+    // logic below only governs GENERATED structs, so resolve native structs to
+    // the natives file directly — otherwise a module that has a Termination file
+    // (or a bag) but whose relevant struct is native would emit a dangling
+    // `import <stem>_types` (the emitter, gated on `has_own_structs`, never wrote
+    // it). This is what lets native-struct modules (e.g. Vec_map / Vec_set) carry
+    // a user Termination file.
+    let struct_name = program.structs.get(&struct_id).name.clone();
+    if native_struct_keys.contains(&(mid, struct_name)) {
+        let stem = get_namespace_file_stem(program, mid);
+        return Some(format!("import {}.{}Natives", pkg, stem));
+    }
     let stem = match module_to_file.get(&mid) {
         Some((_, s)) => s.clone(),
         None => return None,
@@ -222,10 +252,8 @@ fn struct_defining_import(
     // we are resolving a struct that lives in this module.
     let module_has_bag = bag_stems.contains(&stem);
     let module_imports_tci = tci_stems.contains(&stem);
-    let has_termination_file = output_dir
-        .join("Termination")
-        .join(format!("{}.lean", stem))
-        .exists();
+    let (has_term, has_hooks) = user_hook_files(termination_dir, &stem);
+    let has_termination_file = has_term || has_hooks;
     if !(has_termination_file || module_has_bag || module_imports_tci) {
         // Unsplit module: structs live in the main file. Such a module does not
         // import `TyCodeInterp`, so importing it directly is acyclic.
@@ -319,7 +347,7 @@ fn file_uses_bag(program: &Program, module_ids: &[usize]) -> bool {
             return true;
         }
     }
-    for (_, f) in program.functions.iter() {
+    for (fid, f) in program.functions.iter() {
         if !in_file.contains(&f.module_id) {
             continue;
         }
@@ -328,12 +356,89 @@ fn file_uses_bag(program: &Program, module_ids: &[usize]) -> bool {
             .iter()
             .any(|p| type_mentions_struct(&p.param_type, &bag_struct_ids))
             || type_mentions_struct(&f.signature.return_type, &bag_struct_ids)
-            || f.body.calls().any(|fid| bag_fn_ids.contains(&fid))
+            || f.body.calls().any(|c| bag_fn_ids.contains(&c))
+            // Needs BagU for a threaded `[HasCode BagU T]` binder (bag op or
+            // `type_name::get<T>`), or CALLS a function that does — the call
+            // site must resolve the `Universe BagU` / concrete `HasCode BagU`
+            // instances. Without this, `type_name`-using files (that touch no
+            // Bag struct directly) miss the `Generated.BagUInterp` import.
+            || program.fn_bagu_params.contains_key(&fid)
+            || f.body
+                .calls()
+                .any(|c| program.fn_bagu_params.contains_key(&c))
         {
             return true;
         }
     }
     false
+}
+
+/// Module IDs whose emitted FULL module file transitively imports
+/// `Generated.BagUInterp`. A full module file imports `Generated.BagUInterp`
+/// directly iff `file_uses_bag`; and it imports the full module files of every
+/// module in its `required_imports`. So a module whose file re-imports
+/// `BagUInterp` only through a dependency chain (e.g. cetus `Position_snapshot`,
+/// which imports `Position`, which uses bag) is still a transitive importer even
+/// though it uses no bag itself. Computed as reverse reachability over the
+/// `required_imports` graph seeded by the direct bag-users.
+/// Modules whose full emitted file transitively reaches `Generated.World`:
+/// direct World users (world-typed signatures / world-fn body calls) plus the
+/// reverse `required_imports` reachability closure — the world-side analogue
+/// of `full_file_bagu_importers`.
+fn full_file_world_importers(program: &Program) -> HashSet<ModuleID> {
+    let mut importers: HashSet<ModuleID> = HashSet::new();
+    for (mid, _) in program.modules.iter() {
+        if super::dyn_type_universe::module_uses_world(program, *mid) {
+            importers.insert(*mid);
+        }
+    }
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for (mid, module) in program.modules.iter() {
+            if importers.contains(mid) {
+                continue;
+            }
+            if module
+                .required_imports
+                .iter()
+                .any(|imp| importers.contains(imp))
+            {
+                importers.insert(*mid);
+                changed = true;
+            }
+        }
+    }
+    importers
+}
+
+fn full_file_bagu_importers(program: &Program) -> HashSet<ModuleID> {
+    let mut importers: HashSet<ModuleID> = HashSet::new();
+    for (mid, _) in program.modules.iter() {
+        if file_uses_bag(program, &[*mid]) {
+            importers.insert(*mid);
+        }
+    }
+    // A module's full file imports the full files of its `required_imports`;
+    // propagate membership backwards along that edge to a fixed point.
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for (mid, module) in program.modules.iter() {
+            if importers.contains(mid) {
+                continue;
+            }
+            if module
+                .required_imports
+                .iter()
+                .any(|imp| importers.contains(imp))
+            {
+                importers.insert(*mid);
+                changed = true;
+            }
+        }
+    }
+    importers
 }
 
 /// File stems whose emitted module file imports `Generated.TyCodeInterp`
@@ -343,43 +448,144 @@ fn file_uses_bag(program: &Program, module_ids: &[usize]) -> bool {
 /// file, or any importer (e.g. `TyCodeInterp` itself) closes a build cycle.
 /// Generalizes the bag-bearing-struct case to also cover modules that touch a
 /// bag only in function bodies -- e.g. `*_tests` modules in `--test` mode.
-pub fn tycodeinterp_importing_stems(program: &Program) -> HashSet<String> {
-    if !super::dyn_type_universe::program_uses_bag(program) {
-        return HashSet::new();
-    }
-    // The cycle only forms for a module that BOTH defines a struct named in the
-    // `TyCode` universe (so `TyCodeInterp` imports it) AND imports `TyCodeInterp`
-    // itself (so the back-edge closes). Restrict to that intersection -- a bag
-    // container or a bag-using impl module that `TyCodeInterp` never imports must
-    // NOT be split, or its consumers resolve to a `_types` file that was never
-    // emitted.
-    let universe = super::dyn_type_universe::collect(program);
-    let mut universe_struct_ids: HashSet<StructID> = HashSet::new();
-    for leaf in &universe.leaves {
-        for sid in leaf.struct_ids() {
+pub fn tycodeinterp_importing_stems(
+    program: &Program,
+    native_struct_keys: &HashSet<(ModuleID, String)>,
+) -> HashSet<String> {
+    let mut stems: HashSet<String> = HashSet::new();
+    if super::dyn_type_universe::program_uses_bag(program) {
+        // The cycle only forms for a module that BOTH defines a struct named in the
+        // `TyCode` universe (so `TyCodeInterp` imports it) AND imports `TyCodeInterp`
+        // itself (so the back-edge closes). Restrict to that intersection -- a bag
+        // container or a bag-using impl module that `TyCodeInterp` never imports must
+        // NOT be split, or its consumers resolve to a `_types` file that was never
+        // emitted.
+        let universe = super::dyn_type_universe::collect(program);
+        let mut universe_struct_ids: HashSet<StructID> = HashSet::new();
+        for leaf in &universe.leaves {
+            for sid in leaf.struct_ids() {
+                universe_struct_ids.insert(sid);
+            }
+        }
+        for w in &universe.wrappings {
+            universe_struct_ids.insert(w.struct_id);
+        }
+        // `BagUInterp` imports the DEFINING file of every struct in its
+        // DecidableEq derive-target closure, not just leaves/wrappings. If such
+        // a struct's module also uses bag (so its own file imports
+        // `BagUInterp`), a `BagUInterp -> <module> -> BagUInterp` build cycle
+        // forms unless the struct is split into a bag-free `_types` file that
+        // never imports `BagUInterp`. Include those derive-target modules so the
+        // split fires -- mirroring the World-mode branch below. (Non-world-mode
+        // bag packages like cetus clmm hit this: the cycle was
+        // `BagUInterp -> CetusClmm.Position -> BagUInterp`.)
+        for sid in super::dyn_type_universe::decidable_eq_derive_targets(
+            &universe,
+            program,
+            native_struct_keys,
+        ) {
             universe_struct_ids.insert(sid);
         }
+        let universe_mids: HashSet<usize> = program
+            .structs
+            .iter()
+            .filter(|(sid, _)| universe_struct_ids.contains(sid))
+            .map(|(_, s)| s.module_id)
+            .collect();
+        // A module's FULL file transitively imports `Generated.BagUInterp` iff it
+        // directly uses a bag (`file_uses_bag`) OR it (transitively, through the
+        // full-module-file import graph) imports a module that does. Splitting
+        // only DIRECT bag-users misses the case where `BagUInterp` imports a
+        // derive-target module whose full file re-imports `BagUInterp` only via a
+        // dependency chain: e.g. cetus `BagUInterp -> Position_snapshot ->
+        // Position -> BagUInterp`. `Position_snapshot` uses no bag itself, so it
+        // was never split, and importing its full file closed the cycle. Compute
+        // the full transitive-importer closure so EVERY universe/derive-target
+        // module that reaches `BagUInterp` back is split into its bag-free
+        // `_types` half.
+        let transitive_bag_importers = full_file_bagu_importers(program);
+        let mut stem_mids: HashMap<String, Vec<usize>> = HashMap::new();
+        for (mid, (_, stem)) in program.module_to_file.iter() {
+            stem_mids.entry(stem.clone()).or_default().push(*mid);
+        }
+        stems.extend(
+            stem_mids
+                .into_iter()
+                .filter(|(_, mids)| {
+                    mids.iter().any(|m| universe_mids.contains(m))
+                        && mids.iter().any(|m| transitive_bag_importers.contains(m))
+                })
+                .map(|(stem, _)| stem),
+        );
     }
-    for w in &universe.wrappings {
-        universe_struct_ids.insert(w.struct_id);
+    // World-mode: the same hazard class through `Generated/World.lean` — a
+    // module that defines a DF-universe member struct (`TyCodeInterp`
+    // imports its defining file) AND uses World ops (its module file imports
+    // `Generated.World`, which imports `TyCodeInterp`). Splitting its
+    // structs into `<stem>_types` breaks the cycle exactly like the bag
+    // case; `universe_struct_import` then resolves member structs to the
+    // `_types` half.
+    if program.world_functions.is_some() {
+        // The import closure of `TyCodeInterp`/`BagUInterp` is the universe
+        // members PLUS the DecidableEq derive-target field closure (both
+        // universes) — any world-using module defining one of those structs
+        // closes the cycle through `Generated/World.lean`. Native structs are
+        // excluded: they resolve to `*Natives` files, which never use World.
+        let mut member_sids: HashSet<StructID> = HashSet::new();
+        for uni in [
+            super::dyn_type_universe::collect_df(program),
+            super::dyn_type_universe::collect(program),
+        ] {
+            for leaf in &uni.leaves {
+                for sid in leaf.struct_ids() {
+                    member_sids.insert(sid);
+                }
+            }
+            for w in &uni.wrappings {
+                member_sids.insert(w.struct_id);
+            }
+            for sid in super::dyn_type_universe::decidable_eq_derive_targets(
+                &uni,
+                program,
+                native_struct_keys,
+            ) {
+                member_sids.insert(sid);
+            }
+        }
+        member_sids.retain(|sid| {
+            let s = program.structs.get(sid);
+            !native_struct_keys.contains(&(s.module_id, s.name.clone()))
+        });
+        let member_mids: HashSet<usize> = program
+            .structs
+            .iter()
+            .filter(|(sid, _)| member_sids.contains(sid))
+            .map(|(_, s)| s.module_id)
+            .collect();
+        let mut stem_mids: HashMap<String, Vec<usize>> = HashMap::new();
+        for (mid, (_, stem)) in program.module_to_file.iter() {
+            stem_mids.entry(stem.clone()).or_default().push(*mid);
+        }
+        // Transitive-importer closure, mirroring `full_file_bagu_importers`:
+        // a module whose full file merely IMPORTS a world-using module (e.g.
+        // Table_vec → Table) still reaches `Generated.World`, so importing it
+        // from TyCodeInterp closes the cycle even though none of its own kept
+        // functions mention World directly. The direct test alone is
+        // filter-dependent — a narrow --test-filter can prune every
+        // world-using function out of Table_vec while its structs remain
+        // derive targets, leaving the split unfired and the build cyclic.
+        let transitive_world_importers = full_file_world_importers(program);
+        stems.extend(
+            stem_mids
+                .into_iter()
+                .filter(|(_, mids)| {
+                    mids.iter().any(|m| member_mids.contains(m))
+                        && mids.iter().any(|m| transitive_world_importers.contains(m))
+                })
+                .map(|(stem, _)| stem),
+        );
     }
-    let universe_mids: HashSet<usize> = program
-        .structs
-        .iter()
-        .filter(|(sid, _)| universe_struct_ids.contains(sid))
-        .map(|(_, s)| s.module_id)
-        .collect();
-    let mut stem_mids: HashMap<String, Vec<usize>> = HashMap::new();
-    for (mid, (_, stem)) in program.module_to_file.iter() {
-        stem_mids.entry(stem.clone()).or_default().push(*mid);
-    }
-    stem_mids
-        .into_iter()
-        .filter(|(_, mids)| {
-            mids.iter().any(|m| universe_mids.contains(m)) && file_uses_bag(program, mids)
-        })
-        .map(|(stem, _)| stem)
-        .collect()
+    stems
 }
 
 /// Check if a package name indicates it's a spec package.
@@ -504,6 +710,10 @@ fn extract_native_function_names(native_file_path: &Path) -> HashSet<String> {
 }
 
 /// Extract struct/type names defined in a native file.
+pub fn extract_native_struct_names_pub(native_file_path: &Path) -> HashSet<String> {
+    extract_native_struct_names(native_file_path)
+}
+
 fn extract_native_struct_names(native_file_path: &Path) -> HashSet<String> {
     let mut names = HashSet::new();
     if let Ok(content) = fs::read_to_string(native_file_path) {
@@ -634,6 +844,51 @@ pub fn compute_namespace_overrides(program: &mut Program) {
     program.namespace_overrides = overrides;
 }
 
+/// One-time migration from the legacy flat `sources/lean/*.lean` layout to the
+/// `sources/lean/{Proofs,Termination}/` layout that lake builds directly (via
+/// per-lib `srcDir`). Routing rule is the same one the old copy step used: a
+/// file whose stem matches a generated module file is a termination file,
+/// everything else is a proof file.
+fn migrate_user_sources_layout(
+    user_sources_dir: &Path,
+    module_stems: &HashSet<String>,
+) -> anyhow::Result<()> {
+    let Ok(entries) = fs::read_dir(user_sources_dir) else {
+        return Ok(());
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("lean") {
+            continue;
+        }
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .expect("non-utf8 file name in sources/lean")
+            .to_string();
+        let subdir = if module_stems.contains(&stem) {
+            "Termination"
+        } else {
+            "Proofs"
+        };
+        let dest_dir = user_sources_dir.join(subdir);
+        fs::create_dir_all(&dest_dir)?;
+        let dest = dest_dir.join(path.file_name().expect("file has no name"));
+        assert!(
+            !dest.exists(),
+            "cannot migrate {}: {} already exists",
+            path.display(),
+            dest.display()
+        );
+        fs::rename(&path, &dest)?;
+        eprintln!(
+            "  📁 migrated sources/lean/{0}.lean -> sources/lean/{1}/{0}.lean",
+            stem, subdir
+        );
+    }
+    Ok(())
+}
+
 /// Render program to directory structure.
 /// One Lean file per module containing all structs and functions.
 pub fn render_to_directory(
@@ -641,11 +896,12 @@ pub fn render_to_directory(
     output_dir: &Path,
     prelude_imports: &[String],
     package_dir: &Path,
-    _user_proofs_dir: &Path,
     user_package_name: Option<&str>,
     written: &mut WrittenFiles,
 ) -> anyhow::Result<()> {
     fs::create_dir_all(output_dir)?;
+    let user_sources_dir = package_dir.join("sources").join("lean");
+    let termination_dir = user_sources_dir.join("Termination");
 
     compute_namespace_overrides(program);
 
@@ -732,6 +988,29 @@ pub fn render_to_directory(
 
     let sccs = compute_module_sccs(&renderable_module_ids, &adjacency);
 
+    // Native struct keys across ALL renderable modules. A native struct lives in
+    // the module's hand-written `*Natives.lean`, never in a generated `_types`
+    // split, so `struct_defining_import` must resolve it to the natives file even
+    // when the module carries a Termination file or a bag. Computed once up front
+    // because import resolution is cross-module (the per-SCC `native_infos` below
+    // only covers the current SCC).
+    let native_struct_keys: HashSet<(ModuleID, String)> = {
+        let mut set = HashSet::new();
+        for &mid in &renderable_module_ids {
+            let module = program.modules.get(mid);
+            let natives_stem = get_namespace_file_stem(program, mid);
+            let natives_path = output_dir
+                .join(&module.package_name)
+                .join(format!("{}Natives.lean", natives_stem));
+            if natives_path.exists() {
+                for name in extract_native_struct_names(&natives_path) {
+                    set.insert((mid, name));
+                }
+            }
+        }
+        set
+    };
+
     // Build mapping: module_id -> (file_package, file_stem) for import resolution.
     // For singleton SCCs: the original package/namespace.
     // For multi-module SCCs: a merged file in the first module's package directory.
@@ -803,6 +1082,11 @@ pub fn render_to_directory(
     // This lets type/call rendering resolve imports to the correct merged file.
     program.module_to_file = module_to_file.clone();
 
+    // Lake builds sources/lean/{Proofs,Termination}/ directly (per-lib srcDir);
+    // move any legacy flat-layout files into place first.
+    let module_stems: HashSet<String> = module_to_file.values().map(|(_, s)| s.clone()).collect();
+    migrate_user_sources_layout(&user_sources_dir, &module_stems)?;
+
     // Delete stale individual module files for modules that are now merged into SCC groups.
     // Lake uses `globs := #[.submodules]` which picks up ALL .lean files in a directory,
     // so leftover files from previous runs would cause duplicate/conflicting declarations.
@@ -843,7 +1127,7 @@ pub fn render_to_directory(
         })
         .map(|(_, stem)| stem.clone())
         .collect();
-    let tci_stems: HashSet<String> = tycodeinterp_importing_stems(program);
+    let tci_stems: HashSet<String> = tycodeinterp_importing_stems(program, &native_struct_keys);
 
     for scc in &sccs {
         // Determine the modules in this rendering unit.
@@ -945,7 +1229,18 @@ pub fn render_to_directory(
         if super::dyn_type_universe::program_uses_bag(program)
             && file_uses_bag(program, &ordered_scc)
         {
-            file_output.push_str("import Generated.TyCodeInterp\n");
+            file_output.push_str("import Generated.BagUInterp\n");
+        }
+
+        // World-mode: a file whose functions carry the threaded `__world`
+        // param or call `World.*` typed views needs the per-project
+        // `Generated/World.lean` pin (abbrev + wrappers).
+        if program.world_functions.is_some()
+            && ordered_scc
+                .iter()
+                .any(|&mid| super::dyn_type_universe::module_uses_world(program, mid))
+        {
+            file_output.push_str("import Generated.World\n");
         }
 
         // Module imports (deduplicated, redirected to merged files)
@@ -998,26 +1293,13 @@ pub fn render_to_directory(
             }
         }
 
-        // Check if a user-provided termination file exists for this module.
-        // User places all files in sources/lean/ (copied to output/Proofs/).
-        // If a file matching this module's stem exists in Proofs/, move it to
-        // Termination/ so the generated code can import it (and Proofs/ lean_lib
-        // won't pick it up with duplicate namespace definitions).
+        // Check if a user-provided termination file exists for this module:
+        // sources/lean/Termination/<stem>.lean, built by lake in place.
         let first_mid = ordered_scc[0];
         let (file_pkg_first, file_stem) = module_to_file[&first_mid].clone();
-        let termination_file = output_dir
-            .join("Termination")
-            .join(format!("{}.lean", file_stem));
-        let proofs_candidate = output_dir
-            .join("Proofs")
-            .join(format!("{}.lean", file_stem));
-        if proofs_candidate.exists() {
-            // Move from Proofs/ to Termination/ (avoids duplicate lean_lib compilation)
-            crate::copy_if_changed(&proofs_candidate, &termination_file, written)
-                .expect("failed to copy termination file from Proofs/ to Termination/");
-            std::fs::remove_file(&proofs_candidate).ok();
-        }
-        let has_termination_file = termination_file.exists();
+        let termination_file = termination_dir.join(format!("{}.lean", file_stem));
+        let (has_term_file, has_hooks_file) = user_hook_files(&termination_dir, &file_stem);
+        let has_termination_file = has_term_file || has_hooks_file;
 
         // Parse the termination file (if any) for the set of measure definitions it
         // provides — lines `def <name>.termination ...`. A loop helper only gets a
@@ -1026,23 +1308,30 @@ pub fn render_to_directory(
         // `termination_by (0 : Nat); decreasing_by all_goals sorry` default. This lets
         // a termination file cover SOME loops in a module without forcing every other
         // recursive helper to reference a (nonexistent) user macro.
-        let termination_measures: HashSet<String> = if has_termination_file {
-            std::fs::read_to_string(&termination_file)
-                .map(|content| {
-                    content
-                        .lines()
-                        .filter_map(|line| {
-                            let t = line.trim_start();
-                            let rest = t.strip_prefix("def ")?;
-                            let name = rest.split([' ', '(', '\t']).next()?;
-                            name.strip_suffix(".termination")
-                                .map(|stem| stem.to_string())
-                        })
-                        .collect()
+        let termination_measures: HashSet<String> = {
+            let mut content = String::new();
+            if has_term_file {
+                content.push_str(&std::fs::read_to_string(&termination_file).unwrap_or_default());
+            }
+            if has_hooks_file {
+                let hooks_file = termination_dir
+                    .parent()
+                    .expect("sources/lean has a parent")
+                    .join("Hooks")
+                    .join(format!("{}.lean", file_stem));
+                content.push('\n');
+                content.push_str(&std::fs::read_to_string(&hooks_file).unwrap_or_default());
+            }
+            content
+                .lines()
+                .filter_map(|line| {
+                    let t = line.trim_start();
+                    let rest = t.strip_prefix("def ")?;
+                    let name = rest.split([' ', '(', '\t']).next()?;
+                    name.strip_suffix(".termination")
+                        .map(|stem| stem.to_string())
                 })
-                .unwrap_or_default()
-        } else {
-            HashSet::new()
+                .collect()
         };
 
         // Factor struct definitions into a separate `*_types.lean` file (with a
@@ -1170,11 +1459,12 @@ pub fn render_to_directory(
                                     program,
                                     dep_sid,
                                     &file_stem,
-                                    output_dir,
+                                    &termination_dir,
                                     &module_to_file,
                                     &bag_ids,
                                     &bag_stems,
                                     &tci_stems,
+                                    &native_struct_keys,
                                 ) {
                                     target.insert(line);
                                 }
@@ -1208,7 +1498,7 @@ pub fn render_to_directory(
                 let skeleton_stem = format!("{}_types_skeleton", file_stem);
                 let mut sk_out = common_imports.clone();
                 sk_out.push_str(&fmt_imports(&skeleton_imports));
-                sk_out.push_str("import Generated.TyCode\n");
+                sk_out.push_str("import Generated.BagU\n");
                 sk_out.push_str(set_opt);
                 sk_out.push_str(&skeleton_body);
                 let sk_path = output_dir
@@ -1219,7 +1509,7 @@ pub fn render_to_directory(
                 let mut ty_out = common_imports.clone();
                 ty_out.push_str(&fmt_imports(&types_imports));
                 ty_out.push_str(&format!("import {}.{}\n", file_pkg_first, skeleton_stem));
-                ty_out.push_str("import Generated.TyCodeInterp\n");
+                ty_out.push_str("import Generated.BagUInterp\n");
                 ty_out.push_str(set_opt);
                 ty_out.push_str(&types_body);
                 let types_path = output_dir
@@ -1246,8 +1536,11 @@ pub fn render_to_directory(
             false
         };
 
-        if has_termination_file {
+        if has_term_file {
             file_output.push_str(&format!("import Termination.{}\n", file_stem));
+        }
+        if has_hooks_file {
+            file_output.push_str(&format!("import Hooks.{}\n", file_stem));
         }
 
         file_output.push('\n');
@@ -1615,6 +1908,7 @@ pub fn render_to_directory(
                         let writer = LeanWriter::new(String::new());
                         let writer = render_function(
                             f,
+                            gfid,
                             program,
                             &namespace_name,
                             writer,
@@ -1642,6 +1936,7 @@ pub fn render_to_directory(
                     let writer = LeanWriter::new(String::new());
                     let writer = render_function(
                         func,
+                        func_id,
                         program,
                         &namespace_name,
                         writer,
@@ -1654,7 +1949,33 @@ pub fn render_to_directory(
                         file_output.push_str(&rendered);
                         file_output.push('\n');
                     }
+                    // Frame lemmas (§5.4, Phase 4) — before any
+                    // `attribute [irreducible]` from the equation block.
+                    file_output.push_str(&render_frame_lemmas(program, func_id));
+                    // `irreducible_defs` gate: equation/projection lemmas +
+                    // `attribute [irreducible]`, right after the def.
+                    file_output.push_str(&render_equation_lemmas(program, func_id));
                 }
+            }
+
+            // Recomposition lemmas for decomposed `.aborts` bodies (must come
+            // after both the `.aborts` def and its segment defs).
+            for &module_id in &ordered_scc {
+                let namespace_name = get_namespace(program, module_id);
+                let mut theorems = render_decompose_theorems(program, module_id, &namespace_name);
+                theorems.push_str(&render_aborts_bundles(program, module_id));
+                theorems.push_str(&render_ensures_bundles(program, module_id));
+                if theorems.is_empty() {
+                    continue;
+                }
+                if current_namespace.as_ref() != Some(&namespace_name) {
+                    if let Some(ref ns) = current_namespace {
+                        file_output.push_str(&format!("end {}\n\n", ns));
+                    }
+                    file_output.push_str(&format!("namespace {}\n", namespace_name));
+                    current_namespace = Some(namespace_name.clone());
+                }
+                file_output.push_str(&theorems);
             }
 
             // Close the last open namespace
@@ -1839,6 +2160,7 @@ pub fn render_to_directory(
                                 let writer = LeanWriter::new(String::new());
                                 let writer = render_function(
                                     f,
+                                    gfid,
                                     program,
                                     &namespace_name,
                                     writer,
@@ -1858,6 +2180,7 @@ pub fn render_to_directory(
                         let writer = LeanWriter::new(String::new());
                         let writer = render_function(
                             func,
+                            func_id,
                             program,
                             &namespace_name,
                             writer,
@@ -1870,8 +2193,23 @@ pub fn render_to_directory(
                             file_output.push_str(&rendered);
                             file_output.push('\n');
                         }
+                        // Frame lemmas (§5.4, Phase 4) — before any
+                        // `attribute [irreducible]` from the equation block.
+                        file_output.push_str(&render_frame_lemmas(program, func_id));
+                        // `irreducible_defs` gate: equation/projection lemmas
+                        // + `attribute [irreducible]`, right after the def.
+                        file_output.push_str(&render_equation_lemmas(program, func_id));
                     }
                 }
+
+                // Recomposition lemmas for decomposed `.aborts` bodies.
+                file_output.push_str(&render_decompose_theorems(
+                    program,
+                    module_id,
+                    &namespace_name,
+                ));
+                file_output.push_str(&render_aborts_bundles(program, module_id));
+                file_output.push_str(&render_ensures_bundles(program, module_id));
 
                 if !file_output.ends_with("\n\n") {
                     file_output.push('\n');
@@ -1892,7 +2230,6 @@ pub fn render_to_directory(
 
     // Generate Correctness files: for each module with ensures/requires defs,
     // emit theorems that call the user's proof (or sorry as placeholder).
-    let user_sources_dir = package_dir.join("sources").join("lean");
     generate_correctness_files(
         program,
         output_dir,
@@ -1997,6 +2334,13 @@ fn generate_correctness_files(
         if !is_spec {
             continue;
         }
+        // Bundle/segmentation helpers hoisted off a spec face
+        // (`<spec>.aborts.atom_k`, `<spec>.ensures.seg_k`, obligation defs)
+        // are decompose_aborts side-cars, not proof obligations.
+        if func.name.contains(".atom_") || func.name.contains(".seg_") || func.name.contains(".ob_")
+        {
+            continue;
+        }
         // Resolve spec module → impl module for merged spec packages.
         // Try direct lookup first, then resolve through spec_to_impl.
         let (file_pkg, file_stem) = if let Some(entry) = module_to_file.get(&func.module_id) {
@@ -2052,9 +2396,9 @@ fn generate_correctness_files(
     for ((file_pkg, file_stem), spec_funcs) in &spec_funcs_by_file {
         let correctness_path = correctness_dir.join(format!("{}.lean", file_stem));
 
-        // Check if user has a proof file at Proofs/<file_stem>Proofs.lean
+        // Check if user has a proof file at sources/lean/Proofs/<file_stem>Proofs.lean
         // If so, scan it for available theorem names to know which obligations are proved.
-        let proofs_file = output_dir
+        let proofs_file = user_sources_dir
             .join("Proofs")
             .join(format!("{}Proofs.lean", file_stem));
         let has_proofs = proofs_file.exists();
@@ -2185,6 +2529,41 @@ fn generate_correctness_files(
                     ));
                 }
             }
+            // Bag-universe binders: the goal references bag-using functions whose
+            // signatures now carry `[HasCode BagU T]`, so the obligation must
+            // bind the same instances. Union the spec function's own
+            // `fn_bagu_params` with those of the impl it proves (resolved via
+            // spec_to_impl + the `_spec` name strip) — the spec `.ensures` face
+            // need not transitively reach the bag op, but the impl always does.
+            {
+                let mut bagu_idx: std::collections::BTreeSet<u16> = program
+                    .fn_bagu_params
+                    .get(&entry.func_id)
+                    .cloned()
+                    .unwrap_or_default();
+                let base = func
+                    .name
+                    .split_once(".aborts")
+                    .or_else(|| func.name.split_once(".ensures"))
+                    .or_else(|| func.name.split_once(".requires"))
+                    .map(|(b, _)| b)
+                    .unwrap_or(func.name.as_str());
+                let impl_base = base.strip_suffix("_spec").unwrap_or(base);
+                if let Some(&impl_mid) = program.spec_to_impl.get(&func.module_id) {
+                    for cand in [impl_base.to_string(), format!("{}.aborts", impl_base)] {
+                        if let Some(&fid) = func_by_module_name.get(&(impl_mid, cand.as_str())) {
+                            if let Some(idx) = program.fn_bagu_params.get(&fid) {
+                                bagu_idx.extend(idx);
+                            }
+                        }
+                    }
+                }
+                for &i in &bagu_idx {
+                    if let Some(tp) = type_param_names.get(i as usize) {
+                        body.push_str(&format!(" [HasCode BagU {}]", tp));
+                    }
+                }
+            }
 
             // Value parameters (from the spec function)
             let mut param_names: Vec<String> = Vec::new();
@@ -2210,7 +2589,7 @@ fn generate_correctness_files(
                     body.push_str(&format!(
                         " ({} : {})",
                         pp.name,
-                        super::function_renderer::proof_param_type_string(pp, func)
+                        super::function_renderer::proof_param_type_string(pp, func, program)
                     ));
                 }
                 func.signature
@@ -2245,137 +2624,154 @@ fn generate_correctness_files(
             // Spec name "insert_spec.aborts" → impl name "insert.aborts" (strip _spec).
             // Find impl by: (1) spec_to_impl if available, (2) name-based search in non-spec packages
             // matching the spec's base package name.
-            let impl_aborts_info: Option<(String, String, Vec<(String, String)>)> = if has_asserts {
-                let base = base_spec_name.as_ref().expect("checked");
-                let impl_base = base.strip_suffix("_spec").unwrap_or(base);
-                let impl_func_name = format!("{}.aborts", impl_base);
+            let impl_aborts_info: Option<(String, String, Vec<(String, String)>, Vec<String>)> =
+                if has_asserts {
+                    let base = base_spec_name.as_ref().expect("checked");
+                    let impl_base = base.strip_suffix("_spec").unwrap_or(base);
+                    let impl_func_name = format!("{}.aborts", impl_base);
 
-                // Try spec_to_impl first
-                let mut found_impl: Option<(ModuleID, usize)> = program
-                    .spec_to_impl
-                    .get(&func.module_id)
-                    .and_then(|&impl_mid| {
-                        func_by_module_name
-                            .get(&(impl_mid, impl_func_name.as_str()))
-                            .map(|&fid| (impl_mid, fid))
-                    });
+                    // Try spec_to_impl first
+                    let mut found_impl: Option<(ModuleID, usize)> = program
+                        .spec_to_impl
+                        .get(&func.module_id)
+                        .and_then(|&impl_mid| {
+                            func_by_module_name
+                                .get(&(impl_mid, impl_func_name.as_str()))
+                                .map(|&fid| (impl_mid, fid))
+                        });
 
-                // Validate: if found, check that the impl .aborts function's first
-                // param type matches the spec function's first param type. This catches
-                // cases where spec_to_impl maps to the wrong module (e.g., referral_specs
-                // maps to referral, but the spec actually targets user_rebates).
-                if let Some((_, fid)) = found_impl {
-                    let impl_func = program.functions.get(&fid);
-                    if let (Some(spec_first), Some(impl_first)) = (
-                        func.signature.parameters.first(),
-                        impl_func.signature.parameters.first(),
-                    ) {
-                        if spec_first.param_type != impl_first.param_type {
-                            found_impl = None;
+                    // Validate: if found, check that the impl .aborts function's first
+                    // param type matches the spec function's first param type. This catches
+                    // cases where spec_to_impl maps to the wrong module (e.g., referral_specs
+                    // maps to referral, but the spec actually targets user_rebates).
+                    if let Some((_, fid)) = found_impl {
+                        let impl_func = program.functions.get(&fid);
+                        if let (Some(spec_first), Some(impl_first)) = (
+                            func.signature.parameters.first(),
+                            impl_func.signature.parameters.first(),
+                        ) {
+                            if spec_first.param_type != impl_first.param_type {
+                                found_impl = None;
+                            }
                         }
                     }
-                }
 
-                // Fallback: search by function name across non-spec packages.
-                // Match by: (1) base package name (MoveSTLSpecs → movestl matches MoveSTL),
-                // AND (2) spec module name ends with impl module name (move_stl_skip_list ends with skip_list).
-                // This avoids cross-module matches (e.g., skip_list's borrow_spec matching linked_table's borrow).
-                if found_impl.is_none() {
-                    if let Some(candidates) = funcs_by_name.get(impl_func_name.as_str()) {
-                        let spec_mod = program.modules.get(func.module_id);
-                        let spec_pkg_base = spec_mod
-                            .package_name
-                            .to_lowercase()
-                            .replace('_', "")
-                            .trim_end_matches("specs")
-                            .to_string();
-                        for &(cand_mid, cand_fid) in candidates {
-                            let cand_mod = program.modules.get(cand_mid);
-                            if spec_packages.contains(cand_mod.package_name.as_str()) {
-                                continue;
+                    // Fallback: search by function name across non-spec packages.
+                    // Match by: (1) base package name (MoveSTLSpecs → movestl matches MoveSTL),
+                    // AND (2) spec module name ends with impl module name (move_stl_skip_list ends with skip_list).
+                    // This avoids cross-module matches (e.g., skip_list's borrow_spec matching linked_table's borrow).
+                    if found_impl.is_none() {
+                        if let Some(candidates) = funcs_by_name.get(impl_func_name.as_str()) {
+                            let spec_mod = program.modules.get(func.module_id);
+                            let spec_pkg_base = spec_mod
+                                .package_name
+                                .to_lowercase()
+                                .replace('_', "")
+                                .trim_end_matches("specs")
+                                .to_string();
+                            for &(cand_mid, cand_fid) in candidates {
+                                let cand_mod = program.modules.get(cand_mid);
+                                if spec_packages.contains(cand_mod.package_name.as_str()) {
+                                    continue;
+                                }
+                                let cand_pkg_base =
+                                    cand_mod.package_name.to_lowercase().replace('_', "");
+                                if cand_pkg_base != spec_pkg_base {
+                                    continue;
+                                }
+                                // Check module name match: spec module name should end with
+                                // the impl module name (e.g., move_stl_skip_list ends with skip_list).
+                                let spec_name = &spec_mod.name;
+                                let cand_name = &cand_mod.name;
+                                if spec_name == cand_name
+                                    || spec_name.ends_with(&format!("_{}", cand_name))
+                                {
+                                    found_impl = Some((cand_mid, cand_fid));
+                                    break;
+                                }
                             }
-                            let cand_pkg_base =
-                                cand_mod.package_name.to_lowercase().replace('_', "");
-                            if cand_pkg_base != spec_pkg_base {
-                                continue;
-                            }
-                            // Check module name match: spec module name should end with
-                            // the impl module name (e.g., move_stl_skip_list ends with skip_list).
-                            let spec_name = &spec_mod.name;
-                            let cand_name = &cand_mod.name;
-                            if spec_name == cand_name
-                                || spec_name.ends_with(&format!("_{}", cand_name))
-                            {
-                                found_impl = Some((cand_mid, cand_fid));
-                                break;
-                            }
-                        }
 
-                        // If module name match failed, try parameter type matching.
-                        // This handles cross-module spec targets (e.g., referral_specs
-                        // targeting user_rebates functions where types differ from referral).
-                        if found_impl.is_none() {
-                            if let Some(spec_first_type) =
-                                func.signature.parameters.first().map(|p| &p.param_type)
-                            {
-                                for &(cand_mid, cand_fid) in candidates {
-                                    let cand_mod = program.modules.get(cand_mid);
-                                    if spec_packages.contains(cand_mod.package_name.as_str()) {
-                                        continue;
-                                    }
-                                    let cand_func = program.functions.get(&cand_fid);
-                                    if let Some(cand_first) = cand_func.signature.parameters.first()
-                                    {
-                                        if &cand_first.param_type == spec_first_type {
-                                            found_impl = Some((cand_mid, cand_fid));
-                                            break;
+                            // If module name match failed, try parameter type matching.
+                            // This handles cross-module spec targets (e.g., referral_specs
+                            // targeting user_rebates functions where types differ from referral).
+                            if found_impl.is_none() {
+                                if let Some(spec_first_type) =
+                                    func.signature.parameters.first().map(|p| &p.param_type)
+                                {
+                                    for &(cand_mid, cand_fid) in candidates {
+                                        let cand_mod = program.modules.get(cand_mid);
+                                        if spec_packages.contains(cand_mod.package_name.as_str()) {
+                                            continue;
+                                        }
+                                        let cand_func = program.functions.get(&cand_fid);
+                                        if let Some(cand_first) =
+                                            cand_func.signature.parameters.first()
+                                        {
+                                            if &cand_first.param_type == spec_first_type {
+                                                found_impl = Some((cand_mid, cand_fid));
+                                                break;
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
                     }
-                }
 
-                if let Some((impl_mid, fid)) = found_impl {
-                    let impl_ns = get_namespace(program, impl_mid);
-                    let impl_func = program.functions.get(&fid);
-                    let impl_params: Vec<(String, String)> = impl_func
-                        .signature
-                        .parameters
-                        .iter()
-                        .map(|p| {
-                            let name = escape::escape_identifier(&p.name);
-                            let ty = type_to_string_with_params(
-                                &p.param_type,
-                                program,
-                                Some(&impl_ns),
-                                Some(&type_param_names),
-                            );
-                            (name, ty)
-                        })
-                        .collect();
-                    if let Some((impl_pkg, impl_stem)) = module_to_file.get(&impl_mid) {
-                        let import = format!("{}.{}", impl_pkg, impl_stem);
-                        impl_imports.insert(import);
+                    if let Some((impl_mid, fid)) = found_impl {
+                        let impl_ns = get_namespace(program, impl_mid);
+                        let impl_func = program.functions.get(&fid);
+                        let impl_params: Vec<(String, String)> = impl_func
+                            .signature
+                            .parameters
+                            .iter()
+                            .map(|p| {
+                                let name = escape::escape_identifier(&p.name);
+                                let ty = type_to_string_with_params(
+                                    &p.param_type,
+                                    program,
+                                    Some(&impl_ns),
+                                    Some(&type_param_names),
+                                );
+                                (name, ty)
+                            })
+                            .collect();
+                        if let Some((impl_pkg, impl_stem)) = module_to_file.get(&impl_mid) {
+                            let import = format!("{}.{}", impl_pkg, impl_stem);
+                            impl_imports.insert(import);
+                        }
+                        let impl_proof_params: Vec<String> = impl_func
+                            .signature
+                            .proof_params
+                            .iter()
+                            .map(|pp| pp.name.clone())
+                            .collect();
+                        Some((
+                            impl_ns,
+                            escape::escape_identifier(&impl_func_name),
+                            impl_params,
+                            impl_proof_params,
+                        ))
+                    } else {
+                        None
                     }
-                    Some((
-                        impl_ns,
-                        escape::escape_identifier(&impl_func_name),
-                        impl_params,
-                    ))
                 } else {
                     None
-                }
-            } else {
-                None
-            };
+                };
 
             if has_asserts && impl_aborts_info.is_some() {
                 // Implication form: asserts_cond₁ → ... → ¬impl_ns.impl.aborts params
                 // This proves the implementation doesn't abort when preconditions hold.
-                let (ref impl_ns, ref impl_escaped_name, ref impl_params) =
+                let (ref impl_ns, ref impl_escaped_name, ref impl_params, ref impl_proof_params) =
                     impl_aborts_info.as_ref().expect("checked");
+                // World-mode: the SPEC face always carries machine-injected
+                // binders (`__world`, `__ghost_*`), but the impl `.aborts`
+                // only carries the ones its own cone was threaded with
+                // (world_mode replaces ghost slots with `__world`, and an
+                // impl that never touches the World has neither). Machine
+                // params are name-stable across spec/impl, so filter them by
+                // presence; user params keep positional forwarding.
+                let impl_has_machine_param = |n: &str| impl_params.iter().any(|(p, _)| p == n);
                 body.push_str(" :");
                 let conds = asserts_conds.expect("checked above");
                 for cond_name in conds.iter() {
@@ -2397,10 +2793,18 @@ fn generate_correctness_files(
                 // Use the theorem's own parameter names (from the spec function),
                 // not the impl function's parameter names which may differ.
                 for pn in &param_names {
+                    if pn.starts_with("__") && !impl_has_machine_param(pn) {
+                        continue;
+                    }
                     body.push_str(&format!(" {}", pn));
                 }
+                // Forward only the proof params the impl itself carries: a
+                // spec-boundary-only hypothesis (e.g. `hdinv`) is a binder on
+                // the obligation, not an argument of the impl.
                 for pn in &proof_param_names {
-                    body.push_str(&format!(" {}", pn));
+                    if impl_proof_params.contains(pn) {
+                        body.push_str(&format!(" {}", pn));
+                    }
                 }
                 body.push_str(" = Option.none");
             } else if is_aborts {
@@ -2467,8 +2871,224 @@ fn generate_correctness_files(
                     body.push_str(&format!(" {}", pn));
                 }
                 body.push_str("\n\n");
+            } else if func.name.contains(".requires") {
+                // A `requires` face's obligation is vacuous by construction:
+                // every spec `requires` (including this one) is also a
+                // hypothesis of the goal, so the conclusion is literally one
+                // of the antecedents. Self-close instead of emitting a sorry.
+                body.push_str(" := by\n  intros\n  assumption\n\n");
             } else {
                 body.push_str(" := by\n  sorry\n\n");
+            }
+
+            // Stored-value invariant preservation goals (`_data_inv`): the
+            // assert half of the data-invariant discipline. One theorem per
+            // (spec, slot, updated-container result component), stated over
+            // the same binders as the spec's obligation, concluding that the
+            // impl's result still satisfies `TypedMap.all`. Proved by the
+            // user's Proofs file when a matching theorem exists, else sorry.
+            if let Some(goals) = program.data_inv_goals.get(&entry.func_id) {
+                for goal in goals {
+                    let goal_base = flat_name
+                        .strip_suffix("_aborts")
+                        .expect("data_inv goals are keyed by `_spec.aborts` functions");
+                    let goal_flat = format!("{}_data_inv{}", goal_base, goal.goal_suffix);
+                    let impl_func = program.functions.get(&goal.impl_fn_id);
+                    let impl_ns = get_namespace(program, impl_func.module_id);
+                    if let Some((impl_pkg, impl_stem)) = module_to_file.get(&impl_func.module_id) {
+                        impl_imports.insert(format!("{}.{}", impl_pkg, impl_stem));
+                    }
+                    let goal_proved = if is_multi_ns {
+                        available_proofs.contains(&format!("{}.{}", namespace, goal_flat))
+                    } else {
+                        available_proofs.contains(&goal_flat)
+                    };
+                    body.push_str(&format!("theorem {}_proved", goal_flat));
+                    for tp in &type_param_names {
+                        body.push_str(&format!(
+                            " ({} : Type) [BEq {}] [LawfulBEq {}] [Inhabited {}]",
+                            tp, tp, tp, tp
+                        ));
+                    }
+                    if let Some(idx) = program.fn_bagu_params.get(&goal.impl_fn_id) {
+                        for &i in idx {
+                            if let Some(tp) = type_param_names.get(i as usize) {
+                                body.push_str(&format!(" [HasCode BagU {}]", tp));
+                            }
+                        }
+                    }
+                    for p in &func.signature.parameters {
+                        let escaped_param = escape::escape_identifier(&p.name);
+                        let type_str = type_to_string_with_params(
+                            &p.param_type,
+                            program,
+                            Some(namespace),
+                            Some(&type_param_names),
+                        );
+                        body.push_str(&format!(" ({} : {})", escaped_param, type_str));
+                    }
+                    for pp in &func.signature.proof_params {
+                        body.push_str(&format!(
+                            " ({} : {})",
+                            pp.name,
+                            super::function_renderer::proof_param_type_string(pp, func, program)
+                        ));
+                    }
+                    body.push_str(" :");
+                    if let Some(conds) = asserts_conds {
+                        for cond_name in conds.iter() {
+                            body.push_str("\n    ");
+                            body.push_str(&escape::escape_identifier(cond_name));
+                            for tp in &type_param_names {
+                                body.push_str(&format!(" {}", tp));
+                            }
+                            for pn in &param_names {
+                                body.push_str(&format!(" {}", pn));
+                            }
+                            body.push_str(" →");
+                        }
+                    }
+                    let k = type_to_string_with_params(&goal.key_type, program, None, None);
+                    let v = type_to_string_with_params(&goal.value_type, program, None, None);
+                    body.push_str(&format!(
+                        "\n    TypedMap.all ({}) ({}) {} (({}.{}",
+                        k,
+                        v,
+                        goal.pred,
+                        impl_ns,
+                        escape::escape_identifier(&impl_func.name)
+                    ));
+                    for tp in &type_param_names {
+                        body.push_str(&format!(" {}", tp));
+                    }
+                    for pn in param_names.iter().take(goal.n_args) {
+                        body.push_str(&format!(" {}", pn));
+                    }
+                    // Forward the impl's own proof params (e.g. `hpre`) when the
+                    // spec obligation carries a same-named binder.
+                    for pp in &impl_func.signature.proof_params {
+                        if proof_param_names.contains(&pp.name) {
+                            body.push_str(&format!(" {}", pp.name));
+                        }
+                    }
+                    body.push_str(&format!("){}{})", goal.proj_expr, goal.map_tail));
+                    if goal_proved {
+                        let proof_ref = if is_multi_ns {
+                            format!("{}.{}.{}", proof_ns, namespace, goal_flat)
+                        } else {
+                            format!("{}.{}", proof_ns, goal_flat)
+                        };
+                        body.push_str(&format!(" :=\n  {}", proof_ref));
+                        for tp in &type_param_names {
+                            body.push_str(&format!(" {}", tp));
+                        }
+                        for pn in &param_names {
+                            body.push_str(&format!(" {}", pn));
+                        }
+                        for pn in &proof_param_names {
+                            body.push_str(&format!(" {}", pn));
+                        }
+                        body.push_str("\n\n");
+                    } else {
+                        body.push_str(" := by\n  sorry\n\n");
+                    }
+                }
+            }
+
+            // World-mode preservation goals (unified-backend design §7,
+            // Phase 5): same discipline as `_data_inv` above, but concluding
+            // `Prover.World.World.allDf` over the impl's RESULT WORLD at the
+            // invariant's parent uid. Proved by the user's Proofs file when a
+            // matching theorem exists, else sorry.
+            if let Some(goals) = program.data_inv_world_goals.get(&entry.func_id) {
+                for goal in goals {
+                    let goal_base = flat_name
+                        .strip_suffix("_aborts")
+                        .expect("data_inv goals are keyed by `_spec.aborts` functions");
+                    let goal_flat = format!("{}_data_inv{}", goal_base, goal.goal_suffix);
+                    let impl_func = program.functions.get(&goal.impl_fn_id);
+                    let impl_ns = get_namespace(program, impl_func.module_id);
+                    if let Some((impl_pkg, impl_stem)) = module_to_file.get(&impl_func.module_id) {
+                        impl_imports.insert(format!("{}.{}", impl_pkg, impl_stem));
+                    }
+                    let goal_proved = if is_multi_ns {
+                        available_proofs.contains(&format!("{}.{}", namespace, goal_flat))
+                    } else {
+                        available_proofs.contains(&goal_flat)
+                    };
+                    body.push_str(&format!("theorem {}_proved", goal_flat));
+                    for tp in &type_param_names {
+                        body.push_str(&format!(
+                            " ({} : Type) [BEq {}] [LawfulBEq {}] [Inhabited {}]",
+                            tp, tp, tp, tp
+                        ));
+                    }
+                    if let Some(idx) = program.fn_bagu_params.get(&goal.impl_fn_id) {
+                        for &i in idx {
+                            if let Some(tp) = type_param_names.get(i as usize) {
+                                body.push_str(&format!(" [HasCode BagU {}]", tp));
+                            }
+                        }
+                    }
+                    for p in &func.signature.parameters {
+                        let escaped_param = escape::escape_identifier(&p.name);
+                        let type_str = type_to_string_with_params(
+                            &p.param_type,
+                            program,
+                            Some(namespace),
+                            Some(&type_param_names),
+                        );
+                        body.push_str(&format!(" ({} : {})", escaped_param, type_str));
+                    }
+                    for pp in &func.signature.proof_params {
+                        body.push_str(&format!(
+                            " ({} : {})",
+                            pp.name,
+                            super::function_renderer::proof_param_type_string(pp, func, program)
+                        ));
+                    }
+                    body.push_str(" :");
+                    body.push_str(&format!(
+                        "\n    Prover.World.World.allDf (({}.{}",
+                        impl_ns,
+                        escape::escape_identifier(&impl_func.name)
+                    ));
+                    for tp in &type_param_names {
+                        body.push_str(&format!(" {}", tp));
+                    }
+                    for pn in param_names.iter().take(goal.n_args) {
+                        body.push_str(&format!(" {}", pn));
+                    }
+                    for pp in &impl_func.signature.proof_params {
+                        if proof_param_names.contains(&pp.name) {
+                            body.push_str(&format!(" {}", pp.name));
+                        }
+                    }
+                    body.push_str(&format!(
+                        "){}) (World.uidNat {}) {}",
+                        goal.world_proj, goal.parent_expr, goal.pred
+                    ));
+                    if goal_proved {
+                        let proof_ref = if is_multi_ns {
+                            format!("{}.{}.{}", proof_ns, namespace, goal_flat)
+                        } else {
+                            format!("{}.{}", proof_ns, goal_flat)
+                        };
+                        body.push_str(&format!(" :=\n  {}", proof_ref));
+                        for tp in &type_param_names {
+                            body.push_str(&format!(" {}", tp));
+                        }
+                        for pn in &param_names {
+                            body.push_str(&format!(" {}", pn));
+                        }
+                        for pn in &proof_param_names {
+                            body.push_str(&format!(" {}", pn));
+                        }
+                        body.push_str("\n\n");
+                    } else {
+                        body.push_str(" := by\n  sorry\n\n");
+                    }
+                }
             }
 
             // Build starter proof stub: theorem flat_name (params) : proposition := by sorry
@@ -2500,6 +3120,13 @@ fn generate_correctness_files(
                         tp, tp, tp, tp
                     ));
                 }
+                if let Some(idx) = program.fn_bagu_params.get(&entry.func_id) {
+                    for &i in idx {
+                        if let Some(tp) = type_param_names.get(i as usize) {
+                            starter_body.push_str(&format!(" [HasCode BagU {}]", tp));
+                        }
+                    }
+                }
                 for p in &func.signature.parameters {
                     let escaped_param = escape::escape_identifier(&p.name);
                     let type_str = type_to_string_with_params(
@@ -2514,7 +3141,7 @@ fn generate_correctness_files(
                     starter_body.push_str(&format!(
                         " ({} : {})",
                         pp.name,
-                        super::function_renderer::proof_param_type_string(pp, func)
+                        super::function_renderer::proof_param_type_string(pp, func, program)
                     ));
                 }
                 starter_body.push_str(" :");
@@ -2532,7 +3159,7 @@ fn generate_correctness_files(
                         }
                         starter_body.push_str(" →");
                     }
-                    let (ref impl_ns, ref impl_escaped_name, _) =
+                    let (ref impl_ns, ref impl_escaped_name, _, ref impl_proof_params) =
                         impl_aborts_info.as_ref().expect("checked");
                     starter_body.push_str(&format!("\n    {}.{}", impl_ns, impl_escaped_name));
                     for tp in &type_param_names {
@@ -2542,7 +3169,9 @@ fn generate_correctness_files(
                         starter_body.push_str(&format!(" {}", pn));
                     }
                     for pn in &proof_param_names {
-                        starter_body.push_str(&format!(" {}", pn));
+                        if impl_proof_params.contains(pn) {
+                            starter_body.push_str(&format!(" {}", pn));
+                        }
                     }
                     starter_body.push_str(" = Option.none");
                 } else if is_aborts {
@@ -2604,7 +3233,7 @@ fn generate_correctness_files(
         output.push_str("-- Correctness proof obligations generated by the translator.\n");
         if !has_proofs {
             output.push_str(&format!(
-                "-- Provide proofs in sources/lean/{}Proofs.lean (namespace {}).\n",
+                "-- Provide proofs in sources/lean/Proofs/{}Proofs.lean (namespace {}).\n",
                 file_stem, proof_ns
             ));
         }
@@ -2633,9 +3262,11 @@ fn generate_correctness_files(
                 || pkg_lower == format!("{}specs", name_lower)
                 || pkg_lower.starts_with(&name_lower)
         });
-        let starter_path = user_sources_dir.join(format!("{}Proofs.lean", file_stem));
+        let starter_path = user_sources_dir
+            .join("Proofs")
+            .join(format!("{}Proofs.lean", file_stem));
         if is_user_pkg && !starter_path.exists() && !starter_body.is_empty() {
-            fs::create_dir_all(user_sources_dir)?;
+            fs::create_dir_all(user_sources_dir.join("Proofs"))?;
             let mut starter_output = String::new();
             starter_output.push_str(&format!("import {}.{}\n", file_pkg, file_stem));
             // Add impl imports needed for aborts theorems
@@ -2788,6 +3419,7 @@ fn copy_native_packages(
             }
             renames.push((original, override_ns.clone()));
         }
+        renames.sort();
 
         // Native `.aborts` companions are authored as `Option MoveAbort`
         // directly in the `lemmas/` source files, so files are copied verbatim

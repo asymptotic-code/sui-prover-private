@@ -29,6 +29,15 @@ pub fn render_type<W: Write>(ty: &Type, ctx: &mut RenderCtx<W>) {
             let module_def = ctx.program.modules.get(struct_def.module_id);
             let escaped_name = escape::escape_struct_name(&struct_def.name);
 
+            // World-mode: the synthetic World struct renders as the
+            // per-project `Generated/World.lean` abbrev.
+            if struct_def.qualified_name
+                == intermediate_theorem_format::analysis::world_threading::WORLD_STRUCT_QN
+            {
+                ctx.write("_root_.World");
+                return;
+            }
+
             // Heterogeneous bags are modeled over the per-project closed
             // universe `TyCode` (see Prelude/Universe.lean + Generated/).
             // `bag::Bag` / `object_bag::ObjectBag` carry no type param in Move
@@ -44,7 +53,7 @@ pub fn render_type<W: Write>(ty: &Type, ctx: &mut RenderCtx<W>) {
                     .cloned()
                     .unwrap_or_else(|| escape::module_name_to_namespace(&module_def.name));
                 ctx.write(&format!(
-                    "(_root_.{}.{} _root_.TyCode",
+                    "(_root_.{}.{} _root_.BagU",
                     namespace, escaped_name
                 ));
                 for arg in type_args {

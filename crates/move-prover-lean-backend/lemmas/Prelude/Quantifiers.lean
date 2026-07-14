@@ -8,6 +8,11 @@ import MoveStdlib.IntegerNatives
 
 -- Move vectors are bounded by u64 max. This axiom is also declared in
 -- MoveVectorNatives but duplicated here so the Prelude is self-contained.
+-- KNOWN INCONSISTENT as stated (false for e.g. `List.replicate (2^64) ()`):
+-- it models the Move VM invariant and is scheduled to be replaced by a
+-- length-carrying vector subtype (unified-backend-design §13, "BoundedNat
+-- soundness overhaul", item 4). Same status: MoveVector.list_length_bounded
+-- and MoveVector.findIdx_bounded in MoveVectorNatives.lean.
 axiom List.length_bounded_u64 (α : Type) (v : List α) : v.length < 2^64
 
 noncomputable section

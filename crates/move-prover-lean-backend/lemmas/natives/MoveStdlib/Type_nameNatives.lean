@@ -3,6 +3,7 @@
 import Prelude.BoundedNat
 import Prelude.Helpers
 import Prelude.MoveAbort
+import Prelude.Universe
 import MoveStdlib.Ascii
 
 namespace Type_name
@@ -12,17 +13,37 @@ structure TypeName where
 deriving BEq
 instance : Inhabited TypeName where default := ⟨default⟩
 
-def get (tv0 : Type) [BEq tv0] [Inhabited tv0] : TypeName :=
-  default
+-- Encode a Lean `String` as a list of `BoundedNat (2^8)` bytes.
+private def stringToBytes (s : String) : List (BoundedNat (2^8)) :=
+  s.toList.map (fun c => ⟨c.toNat % (2^8), Nat.mod_lt _ (by decide)⟩)
 
-def with_defining_ids (tv0 : Type) [BEq tv0] [Inhabited tv0] : TypeName :=
-  default
+-- Build a `TypeName` whose bytes are the Move fully-qualified type name of
+-- `T`, supplied per code by `Universe.typeName`. Distinct Move types have
+-- distinct FQNs, so `type_name::get<A> ≠ type_name::get<B>` for `A ≠ B` — the
+-- property coin canonical ordering (`is_right_order`) and type-keyed lookups
+-- rely on. The old `:= default` collapsed every type to one name (sound for
+-- uninterpreted spec verification, wrong for concrete execution). The universe
+-- `U` is NOT inferable from the trailing `[HasCode U T]` (Lean resolves
+-- `[Universe U]` left-to-right first and stalls on the metavariable), so the
+-- renderer pins it explicitly at every call site as `Type_name.get (U := BagU)`.
+private def fromCode {U : Type} [Universe U] [Repr U] (T : Type) [hc : HasCode U T] : TypeName :=
+  { name := { bytes := stringToBytes (Universe.typeName hc.code) } }
 
-def get_with_original_ids (tv0 : Type) [BEq tv0] [Inhabited tv0] : TypeName :=
-  default
+def get {U : Type} [Universe U] [Repr U] (T : Type) [BEq T] [Inhabited T] [HasCode U T] :
+    TypeName :=
+  fromCode (U := U) T
 
-def with_original_ids (tv0 : Type) [BEq tv0] [Inhabited tv0] : TypeName :=
-  default
+def with_defining_ids {U : Type} [Universe U] [Repr U] (T : Type) [BEq T] [Inhabited T]
+    [HasCode U T] : TypeName :=
+  fromCode (U := U) T
+
+def get_with_original_ids {U : Type} [Universe U] [Repr U] (T : Type) [BEq T] [Inhabited T]
+    [HasCode U T] : TypeName :=
+  fromCode (U := U) T
+
+def with_original_ids {U : Type} [Universe U] [Repr U] (T : Type) [BEq T] [Inhabited T]
+    [HasCode U T] : TypeName :=
+  fromCode (U := U) T
 
 @[reducible] def is_primitive (_t : TypeName) : Bool :=
   false

@@ -132,11 +132,65 @@ theorem has_set_of_has (K V : Type) [BEq K] [LawfulBEq K] (m : List (K × V)) (k
 -- After erasing a key, has returns false for that key
 theorem has_erase_eq (K V : Type) [BEq K] [LawfulBEq K] [Inhabited V] (m : List (K × V)) (key : K) :
     has K V (erase K V m key).2 key = false := by
-  sorry
+  unfold erase has
+  simp only [List.any_eq_false, List.mem_filter, Bool.not_eq_true', Bool.not_eq_true]
+  intro x hx
+  exact hx.2
 
 -- The erased value equals get
 theorem erase_fst_eq_get (K V : Type) [BEq K] [LawfulBEq K] [Inhabited V] (m : List (K × V)) (key : K) :
-    (erase K V m key).1 = get K V m key := by
-  sorry
+    (erase K V m key).1 = get K V m key := rfl
+
+-- Stored-value data invariants: `all K V P m` states that every value stored
+-- in the map satisfies `P`. The generated `hdinv` spec-boundary hypotheses and
+-- the `_data_inv` preservation goals are stated with this predicate; client
+-- proofs discharge them with the algebra below (`all_nil` for fresh tables,
+-- `all_set` at each write, `all_erase` at each removal, `get_of_all` to
+-- recover `P` for a fetched value — conditioned on membership, since `get`
+-- returns `default` for a missing key).
+
+def all (K V : Type) (P : V → Prop) (m : List (K × V)) : Prop :=
+  ∀ kv ∈ m, P kv.2
+
+theorem all_nil (K V : Type) (P : V → Prop) : all K V P [] := by
+  intro kv h; cases h
+
+theorem get_of_all (K V : Type) [BEq K] [LawfulBEq K] [Inhabited V] {P : V → Prop}
+    {m : List (K × V)} {k : K}
+    (h : all K V P m) (hmem : has K V m k = true) : P (get K V m k) := by
+  induction m with
+  | nil => simp [has] at hmem
+  | cons hd tl ih =>
+    by_cases hk : (hd.1 == k) = true
+    · have hget : get K V (hd :: tl) k = hd.2 := by
+        simp [get, hk]
+      rw [hget]
+      exact h hd (List.mem_cons_self ..)
+    · have hget : get K V (hd :: tl) k = get K V tl k := by
+        simp [get, hk]
+      rw [hget]
+      have hmem' : has K V tl k = true := by
+        simp [has, List.any_cons, hk] at hmem ⊢
+        exact hmem
+      exact ih (fun kv hkv => h kv (List.mem_cons_of_mem _ hkv)) hmem'
+
+theorem all_set (K V : Type) [BEq K] {P : V → Prop} {m : List (K × V)} {k : K} {v : V}
+    (h : all K V P m) (hv : P v) : all K V P (set K V m k v) := by
+  intro kv hkv
+  unfold set at hkv
+  rcases List.mem_cons.mp hkv with heq | hmem
+  · subst heq; exact hv
+  · exact h _ (List.mem_filter.mp hmem).1
+
+theorem all_erase (K V : Type) [BEq K] [Inhabited V] {P : V → Prop}
+    {m : List (K × V)} {k : K}
+    (h : all K V P m) : all K V P (erase K V m k).2 := by
+  intro kv hkv
+  exact h _ (List.mem_filter.mp hkv).1
+
+theorem all_of_all_imp (K V : Type) {P Q : V → Prop} {m : List (K × V)}
+    (h : all K V P m) (himp : ∀ v, P v → Q v) : all K V Q m := by
+  intro kv hkv
+  exact himp _ (h kv hkv)
 
 end TypedMap

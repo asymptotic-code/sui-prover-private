@@ -75,8 +75,7 @@ Linear scan. -/
       if startsAt sub (b :: rest) then i else scan (i + 1) rest
   let found := scan 0 bytes
   if h : found < 2^64 then ⟨found, h⟩
-  else if hb : (2 : Nat) ^ 64 > 0 then ⟨found % 2^64, Nat.mod_lt _ hb⟩
-  else ⟨0, BoundedNat_bound_zero_absurd hb⟩
+  else ⟨found % 2^64, Nat.mod_lt _ (by decide)⟩  -- unreachable for real strings
 
 /-- Substring `bytes[i..j]`. If indices are out of range or `i > j`, returns
 empty list. Total. -/

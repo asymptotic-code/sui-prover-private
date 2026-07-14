@@ -242,3 +242,155 @@ pub fn augment_structs_with_native_ghost_fields(program: &mut Program, lemmas_di
         }
     }
 }
+
+/// World-mode ghost-slot suppression (unified-backend design Phase 5, closing
+/// the Phase-1 deferral "ghost `dynamic_fields` struct slots are still
+/// injected"): in world-mode the df store lives in the threaded World, so the
+/// build-time ghost `dynamic_fields*` fields on GENERATED structs are dead
+/// weight (dead `[]` initializers, noise in `BEq`/`Inhabited` instances, and a
+/// second — unused — store in the invariant story). Remove them, truncating
+/// `Pack` sites to match. Structs declared in a hand-written natives file keep
+/// their fields (the Lean-side structure literally has them; e.g. Table).
+///
+/// No-fallback discipline: a ghost field that is not trailing, is referenced
+/// by a `Field`/`UpdateField`, or whose dropped `Pack` initializer is not a
+/// trivial value is a hard error.
+pub fn suppress_ghost_df_slots_world_mode(program: &mut Program, lemmas_dir: &Path) {
+    use crate::escape;
+    use crate::renderer::{compute_namespace_overrides, get_namespace, get_namespace_file_stem};
+
+    compute_namespace_overrides(program);
+    let mut native_covered: HashMap<usize, HashMap<String, usize>> = HashMap::new();
+    for (&module_id, module) in program.modules.iter() {
+        let capitalized_name = escape::capitalize_first(&module.name);
+        let namespace = get_namespace(program, module_id);
+        let file_stem = get_namespace_file_stem(program, module_id);
+        let candidate_paths = [
+            format!("natives/{}/{}.lean", module.package_name, capitalized_name),
+            format!(
+                "natives/{}/{}Natives.lean",
+                module.package_name, capitalized_name
+            ),
+            format!("natives/{}/{}Natives.lean", module.package_name, namespace),
+            format!("natives/{}/{}Natives.lean", module.package_name, file_stem),
+        ];
+        let Some(native_path) = candidate_paths
+            .iter()
+            .map(|p| lemmas_dir.join(p))
+            .find(|p| p.exists())
+        else {
+            continue;
+        };
+        let counts = parse_native_ghost_field_counts(&native_path);
+        if !counts.is_empty() {
+            native_covered.insert(module_id, counts);
+        }
+    }
+
+    let is_ghost = |name: &str| name == "dynamic_fields" || name.starts_with("dynamic_fields_");
+
+    // (struct id, kept field count)
+    let mut truncations: HashMap<usize, usize> = HashMap::new();
+    let struct_ids: Vec<usize> = program.structs.iter().map(|(&id, _)| id).collect();
+    for sid in struct_ids {
+        let s = program.structs.get(sid);
+        if s.variants.is_some() {
+            continue;
+        }
+        if native_covered
+            .get(&s.module_id)
+            .is_some_and(|m| m.contains_key(&s.name))
+        {
+            continue;
+        }
+        let ghost_count = s.fields.iter().filter(|f| is_ghost(&f.name)).count();
+        if ghost_count == 0 {
+            continue;
+        }
+        let keep = s.fields.len() - ghost_count;
+        assert!(
+            s.fields[keep..].iter().all(|f| is_ghost(&f.name)),
+            "world_mode ghost suppression: struct `{}` has a non-trailing ghost df field",
+            s.name
+        );
+        truncations.insert(sid, keep);
+    }
+    if truncations.is_empty() {
+        return;
+    }
+
+    let fn_ids: Vec<intermediate_theorem_format::FunctionID> =
+        program.functions.iter_ids().collect();
+    for fid in fn_ids {
+        let func = program.functions.get(&fid);
+        if func.is_native {
+            continue;
+        }
+        // No references to a suppressed slot may survive.
+        for n in func.body.iter() {
+            match n {
+                intermediate_theorem_format::IRNode::Field {
+                    struct_id,
+                    field_index,
+                    ..
+                }
+                | intermediate_theorem_format::IRNode::UpdateField {
+                    struct_id,
+                    field_index,
+                    ..
+                } => {
+                    if let Some(&keep) = truncations.get(struct_id) {
+                        assert!(
+                            *field_index < keep,
+                            "world_mode ghost suppression: `{}` references suppressed ghost df \
+                             field #{} of struct id {}",
+                            func.name,
+                            field_index,
+                            struct_id
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+        let fname = func.name.clone();
+        let body = std::mem::take(&mut program.functions.get_mut(fid).body);
+        let rewritten = body.map(&mut |n| match n {
+            intermediate_theorem_format::IRNode::Pack {
+                struct_id,
+                type_args,
+                mut fields,
+                variant_index,
+            } => {
+                if let Some(&keep) = truncations.get(&struct_id) {
+                    if fields.len() > keep {
+                        for dropped in &fields[keep..] {
+                            assert!(
+                                !dropped.iter().any(|c| matches!(
+                                    c,
+                                    intermediate_theorem_format::IRNode::Call { .. }
+                                )),
+                                "world_mode ghost suppression: `{}` initializes a suppressed \
+                                 ghost df field with a non-trivial expression",
+                                fname
+                            );
+                        }
+                        fields.truncate(keep);
+                    }
+                }
+                intermediate_theorem_format::IRNode::Pack {
+                    struct_id,
+                    type_args,
+                    fields,
+                    variant_index,
+                }
+            }
+            other => other,
+        });
+        program.functions.get_mut(fid).body = rewritten;
+    }
+
+    for (sid, keep) in truncations {
+        program.structs.get_mut(sid).fields.truncate(keep);
+    }
+}

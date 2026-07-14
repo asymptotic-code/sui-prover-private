@@ -17,7 +17,7 @@
 //!   upstream's non-verified branch emptied it (upstream zeros it to
 //!   skip Boogie work; Lean still needs the body).
 use move_compiler::shared::known_attributes::AttributeKind_;
-use move_model::model::{FunctionEnv, GlobalEnv};
+use move_model::model::{FunId, FunctionEnv, GlobalEnv, QualifiedId};
 use move_stackless_bytecode::{
     function_target::FunctionData,
     function_target_pipeline::{FunctionTargetProcessor, FunctionTargetsHolder},
@@ -25,6 +25,7 @@ use move_stackless_bytecode::{
     verification_analysis::{VerificationAnalysisProcessor, VerificationInfo},
 };
 use regex::Regex;
+use std::collections::BTreeSet;
 
 /// Compiled `--test-filter` regex plus the literal slice for upstream's
 /// "module name contains literal" short-circuit (mirrored in `matches`).
@@ -75,22 +76,29 @@ pub struct LeanVerificationAnalysisProcessor {
     /// `--test-filter` regex; non-matching `#[test]`s fall through
     /// `process()` unmarked and get pruned. `None` outside test mode.
     test_filter: Option<TestFilter>,
+    keep_functions: BTreeSet<QualifiedId<FunId>>,
 }
 
 impl LeanVerificationAnalysisProcessor {
-    pub fn new(include_all: bool) -> Box<Self> {
+    pub fn new(include_all: bool, keep_functions: BTreeSet<QualifiedId<FunId>>) -> Box<Self> {
         Box::new(Self {
             inner: VerificationAnalysisProcessor::new(),
             include_all,
             test_filter: None,
+            keep_functions,
         })
     }
 
-    pub fn new_for_testing(include_all: bool, test_filter: Option<TestFilter>) -> Box<Self> {
+    pub fn new_for_testing(
+        include_all: bool,
+        test_filter: Option<TestFilter>,
+        keep_functions: BTreeSet<QualifiedId<FunId>>,
+    ) -> Box<Self> {
         Box::new(Self {
             inner: VerificationAnalysisProcessor::new_for_testing(),
             include_all,
             test_filter,
+            keep_functions,
         })
     }
 }
@@ -127,7 +135,9 @@ impl FunctionTargetProcessor for LeanVerificationAnalysisProcessor {
         // the `loop_invariants` registry inside `mark_callees_inlined`, but that
         // registry is populated by `MoveLoopInvariantsProcessor`, which runs
         // after this pass — so for the Lean ordering we keep them here.)
-        if is_spec_only_loop_inv(fun_env) {
+        if is_spec_only_loop_inv(fun_env)
+            || self.keep_functions.contains(&fun_env.get_qualified_id())
+        {
             let info = data
                 .annotations
                 .get_or_default_mut::<VerificationInfo>(true);

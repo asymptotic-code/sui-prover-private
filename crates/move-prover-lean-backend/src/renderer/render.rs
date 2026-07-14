@@ -7,9 +7,29 @@ use super::context::RenderCtx;
 use super::type_renderer::{render_type, render_type_as_arg};
 use crate::escape;
 use intermediate_theorem_format::{
-    BinOp, BitOp, Const, Function, IRNode, ProofParamType, QuantifierKind, StructID, Type, UnOp,
-    VariableRegistry, WriteBackEdge,
+    BinOp, BitOp, Const, Function, FunctionID, IRNode, ProofParamType, QuantifierKind, StructID,
+    Type, UnOp, VariableRegistry, WriteBackEdge,
 };
+
+/// The synthetic `World` struct id, when this program is world-mode.
+fn world_struct_id<W: Write>(ctx: &RenderCtx<W>) -> Option<StructID> {
+    ctx.program.world_functions.as_ref().map(|w| w.struct_id)
+}
+
+/// True when `t` is the synthetic world struct. World-stated `Mutable`s carry
+/// this as their reconstruct STATE; the renderer curries their reconstruct into
+/// `α → World → World` so callers apply the write-back onto the CURRENT world
+/// instead of the stale borrow-time world captured in the closure.
+fn is_world_struct_type<W: Write>(t: &Type, ctx: &RenderCtx<W>) -> bool {
+    matches!(t, Type::Struct { struct_id, .. } if Some(*struct_id) == world_struct_id(ctx))
+}
+
+/// A world-PAIR `Mutable` (heterogeneous phi): state is `(S × World)` where the
+/// world half is a patch. `Mutable.apply` yields `(S, World → World)`.
+fn is_world_pair_mutref<W: Write>(t: &Type, ctx: &RenderCtx<W>) -> bool {
+    matches!(t, Type::MutableReference(_, state)
+        if matches!(state.as_ref(), Type::Tuple(e) if e.len() == 2 && is_world_struct_type(&e[1], ctx)))
+}
 
 /// True if `func` is a loop helper carrying an injected loop-invariant
 /// hypothesis (`hinv`). Detected from the materialized signature proof params —
@@ -105,7 +125,7 @@ fn try_transform_int_ops_call<'a, W: Write>(
 fn contains_entry_call<W: Write>(node: &IRNode, ctx: &RenderCtx<W>) -> bool {
     node.iter().any(|n| {
         matches!(n, IRNode::Call { function, args, .. }
-            if is_loop_inv_helper(ctx.program.functions.get(function))
+            if !ctx.program.functions.get(function).signature.proof_params.is_empty()
                 && matches!(args.last(), Some(IRNode::Abort { .. })))
     })
 }
@@ -282,11 +302,165 @@ pub fn render<'a, W: Write>(
                     );
                     ctx.write("(");
                     ctx.write(&escaped);
-                    for arg in &args[..args.len() - 1] {
+                    for ty in type_args {
                         ctx.write(" ");
-                        render_with_parens_if_needed(arg, ctx, reg);
+                        render_type_as_arg(ty, ctx);
                     }
+                    render_call_args_coerced(function, &args[..args.len() - 1], ctx, reg);
                     ctx.write(&format!(" (by {}))", macro_name));
+                    return;
+                }
+            }
+
+            // hpre argument of a loop_inv IMPL call (e.g. an ordinary impl
+            // function like `compute_slashed_validators`, or a cross-module caller
+            // like `sui_system_state_inner::advance_epoch`, calling a loop_inv
+            // target such as `sum_voting_power_by_addresses`). The entry cascade
+            // couldn't thread a real `hpre` and left an `Abort` placeholder; emit
+            // `(by <impl-module>_<base>_requires)` — a client-provided macro
+            // (`trivial` where the target's `requires` is trivially provable) —
+            // module-qualified so a cross-module caller names the right macro, and
+            // qualifying the function reference itself for the cross-module case.
+            {
+                let func = ctx.program.functions.get(function);
+                let func_name = func.name.clone();
+                if ctx.program.loop_inv_entry_impls.contains(&func_name)
+                    && !ctx.program.callee_requires_impls.contains(function)
+                    && matches!(args.last(), Some(IRNode::Abort { .. }))
+                {
+                    let base = func_name
+                        .strip_suffix(".aborts")
+                        .unwrap_or(&func_name)
+                        .to_string();
+                    let escaped = escape::escape_identifier(&func_name);
+                    let module_def = ctx.program.modules.get(func.module_id);
+                    let namespace = ctx
+                        .program
+                        .namespace_overrides
+                        .get(&func.module_id)
+                        .cloned()
+                        .unwrap_or_else(|| escape::module_name_to_namespace(&module_def.name));
+                    let same_or_merged = func.module_id == ctx.current_module_id
+                        || ctx.merged_module_ids.contains(&func.module_id);
+                    let qualified_fn = if same_or_merged {
+                        escaped
+                    } else {
+                        format!("{}.{}", namespace, escaped)
+                    };
+                    let macro_name = format!(
+                        "{}_{}_requires",
+                        namespace.replace('.', "_"),
+                        base.replace('.', "_")
+                    );
+                    ctx.write("(");
+                    ctx.write(&qualified_fn);
+                    for ty in type_args {
+                        ctx.write(" ");
+                        render_type_as_arg(ty, ctx);
+                    }
+                    render_call_args_coerced(function, &args[..args.len() - 1], ctx, reg);
+                    ctx.write(&format!(" (by {}))", macro_name));
+                    return;
+                }
+            }
+
+            // Callee-`requires` entry impl call whose proof slot is an unfilled
+            // `Abort` placeholder: a caller that cannot supply the precondition
+            // forwarded `Abort` (see `analysis/callee_requires_entry.rs`). Emit
+            // `sorry` (a `Prop` inhabitant) in that slot rather than letting the
+            // generic `Abort` rendering emit a `MoveAbort` *value*, which would
+            // mistype the `Prop`-valued proof parameter. Such a caller stays
+            // `sorry`-tainted by design — it legitimately lacks the invariant.
+            // Checked BEFORE the loop_inv entry path below: a callee-requires
+            // wrapper can share a name with a real loop_inv impl in another module
+            // (the loop_inv set is name-keyed), so the by-ID check must win.
+            {
+                if ctx.program.callee_requires_impls.contains(function)
+                    && matches!(args.last(), Some(IRNode::Abort { .. }))
+                {
+                    let func = ctx.program.functions.get(function);
+                    let escaped = escape::escape_identifier(&func.name);
+                    let same_or_merged = func.module_id == ctx.current_module_id
+                        || ctx.merged_module_ids.contains(&func.module_id);
+                    let qualified_fn = if same_or_merged {
+                        escaped
+                    } else {
+                        let module_def = ctx.program.modules.get(func.module_id);
+                        let namespace = ctx
+                            .program
+                            .namespace_overrides
+                            .get(&func.module_id)
+                            .cloned()
+                            .unwrap_or_else(|| escape::module_name_to_namespace(&module_def.name));
+                        format!("{}.{}", namespace, escaped)
+                    };
+                    ctx.write("(");
+                    ctx.write(&qualified_fn);
+                    for ty in type_args {
+                        ctx.write(" ");
+                        render_type_as_arg(ty, ctx);
+                    }
+                    render_call_args_coerced(function, &args[..args.len() - 1], ctx, reg);
+                    // When the CALLER currently being rendered was threaded by the
+                    // callee-`requires` PRECOND cascade (it carries a client
+                    // `hpre : <caller>.precond …`), discharge G's `requires` slot
+                    // with the client `(by <G-namespace>_<G-base>_requires)` macro
+                    // instead of bare `sorry`. ID-keyed lookup (not name) so a
+                    // same-named cross-module twin that was NOT threaded still
+                    // emits `sorry`. The macro resolves the in-scope `hpre`.
+                    let caller_threaded = ctx.current_function_id.is_some_and(|id| {
+                        ctx.program.callee_requires_precond_callers.contains(&id)
+                    });
+                    if caller_threaded {
+                        let base = func.name.strip_suffix(".aborts").unwrap_or(&func.name);
+                        let namespace = if same_or_merged {
+                            ctx.current_module_namespace.unwrap_or("").to_string()
+                        } else {
+                            let module_def = ctx.program.modules.get(func.module_id);
+                            ctx.program
+                                .namespace_overrides
+                                .get(&func.module_id)
+                                .cloned()
+                                .unwrap_or_else(|| {
+                                    escape::module_name_to_namespace(&module_def.name)
+                                })
+                        };
+                        let macro_name = format!(
+                            "{}_{}_requires",
+                            namespace.replace('.', "_"),
+                            base.replace('.', "_")
+                        );
+                        ctx.write(&format!(" (by {}))", macro_name));
+                    } else {
+                        // Under the per-package `requires_leaves` gate
+                        // (unified-backend design §5.2, Phase 5) a silent
+                        // `sorry` is a contract violation: report it loudly
+                        // (CI-greppable `error:` line, same convention as the
+                        // cast-quarantine check). The `.aborts`-face bundle
+                        // already carries the named RequiresHolds /
+                        // CalleeNoneUnderRequires leaves for this slot; the
+                        // body-side hpre-threading rework that removes the
+                        // token itself is the documented M1 follow-up.
+                        let gated = ctx
+                            .program
+                            .lean_termination_decls
+                            .module_options
+                            .values()
+                            .any(|opts| opts.contains("requires_leaves"));
+                        if gated {
+                            let caller = ctx
+                                .current_function_id
+                                .map(|id| ctx.program.functions.get(&id).name.clone())
+                                .unwrap_or_else(|| "<unknown>".to_string());
+                            eprintln!(
+                                "error: requires_leaves: `{}` renders a requires-slot `sorry` at its call \
+                                 into `{}` (caller cannot supply the precondition; declare a `.precond` \
+                                 hook or prove the spec-face leaves)",
+                                caller, func.name
+                            );
+                        }
+                        ctx.write(" sorry)");
+                    }
                     return;
                 }
             }
@@ -459,6 +633,22 @@ pub fn render<'a, W: Write>(
             }
 
             ctx.write(&func_name);
+            // The universe-polymorphic `type_name::get`-family natives cannot
+            // infer their `{U}` from the trailing `[HasCode U T]` — Lean resolves
+            // `[Universe ?U]` first and stalls on the metavariable. Pin it
+            // explicitly to the project bag universe (`Generated.BagU`, in scope
+            // via the `BagUInterp` import wired by `file_uses_bag`).
+            {
+                let callee_mod = ctx.program.modules.get(func.module_id);
+                if callee_mod.name == "type_name"
+                    && matches!(
+                        func.name.as_str(),
+                        "get" | "with_defining_ids" | "get_with_original_ids" | "with_original_ids"
+                    )
+                {
+                    ctx.write(" (U := _root_.BagU)");
+                }
+            }
             // Single rule: every generated/native callable takes its type
             // parameters explicitly, so we always emit the type args positionally.
             for ty in type_args {
@@ -765,16 +955,49 @@ pub fn render<'a, W: Write>(
             state_type,
         } => {
             // Render as: Mutable.mk val_expr (fun param => (reconstruct_expr : state_type))
-            // Using Mutable.mk explicitly avoids type inference issues with anonymous structs
-            ctx.write("Mutable.mk ");
-            render_with_parens_if_needed(val_expr, ctx, reg);
-            ctx.write(" (fun ");
-            ctx.write(&escape::escape_identifier(reconstruct_param));
-            ctx.write(" => (");
-            render_with_parens_if_needed(reconstruct_expr, ctx, reg);
-            ctx.write(" : ");
-            render_type(state_type, ctx);
-            ctx.write("))");
+            // Using Mutable.mk explicitly avoids type inference issues with anonymous structs.
+            // A multi-line val_expr (match/if/let — e.g. the world-mode typed-read
+            // `match World.getDf …`) cannot be FOLLOWED by another application
+            // argument inside a nested paren group (Lean parse error: application
+            // args may not continue after a multi-line block there), so use the
+            // argument-flipped `Mutable.mkFlip` with the value trailing.
+            let val_is_multiline = matches!(
+                val_expr.as_ref(),
+                IRNode::Match { .. }
+                    | IRNode::MatchOption { .. }
+                    | IRNode::If { .. }
+                    | IRNode::Let { .. }
+            );
+            // World-stated borrows curry the reconstruct into `α → World →
+            // World`: the emitted `fun __world =>` binder SHADOWS the borrow-time
+            // `__world` that the reconstruct expression (`World.setDf … __world
+            // …`) captured, so `Mutable.apply` applied to the CURRENT world
+            // re-anchors the write-back on it. The inner `: World` annotation
+            // still types the `setDf` result.
+            let world_borrow = is_world_struct_type(state_type, ctx);
+            let recon_binder = if world_borrow { "fun __world => (" } else { "(" };
+            if val_is_multiline {
+                ctx.write("Mutable.mkFlip (fun ");
+                ctx.write(&escape::escape_identifier(reconstruct_param));
+                ctx.write(" => ");
+                ctx.write(recon_binder);
+                render_with_parens_if_needed(reconstruct_expr, ctx, reg);
+                ctx.write(" : ");
+                render_type(state_type, ctx);
+                ctx.write(")) ");
+                render_with_parens_if_needed(val_expr, ctx, reg);
+            } else {
+                ctx.write("Mutable.mk ");
+                render_with_parens_if_needed(val_expr, ctx, reg);
+                ctx.write(" (fun ");
+                ctx.write(&escape::escape_identifier(reconstruct_param));
+                ctx.write(" => ");
+                ctx.write(recon_binder);
+                render_with_parens_if_needed(reconstruct_expr, ctx, reg);
+                ctx.write(" : ");
+                render_type(state_type, ctx);
+                ctx.write("))");
+            }
         }
 
         IRNode::ReadRef(inner) => {
@@ -864,26 +1087,173 @@ pub fn render<'a, W: Write>(
                 // bind the `parent` name. But `distinguish_param_rebinds_in_ensures`
                 // may set a non-empty pattern (a fresh `<p>_post` name) so the
                 // post-state rebind does not shadow the parameter — honor it.
-                if let IRNode::WriteBack { parent, .. } = value.as_ref() {
+                if let IRNode::WriteBack { parent, child, .. } = value.as_ref() {
+                    // In an `.aborts` body, rebinding the receiver to `Mutable.apply
+                    // child` mistypes it when `child` is a borrowed SUB-STRUCT whose
+                    // reconstruction differs in type from the receiver — e.g. `&mut
+                    // scenario.ctx` yields a `TxContext` Mutable while the receiver is
+                    // a `Scenario` (Test_runner `advance_epoch.aborts`). Discard the
+                    // reconstruction in that case so the receiver keeps its original
+                    // type for later abort-side reads.
+                    //
+                    // But this only applies when `child` is a Mutable (the
+                    // sub-struct-reconstruct shape). When `child` is a PLAIN value —
+                    // the `__mut_ret` result of a mutref-returning call like
+                    // `vector::push_back`, which has the SAME type as the receiver —
+                    // the writeback renders as a well-typed `let parent := child` and
+                    // is REQUIRED: later abort-side reads of `parent` must see the
+                    // mutation (sui-system `staking_min_threshold.aborts`: a
+                    // `vector[validator]` literal whose `push_back` result was dropped,
+                    // so `validator_set::new` saw an empty vector and `total_stake`
+                    // computed as 0).
+                    let child_is_mutable = reg.contains(child)
+                        && matches!(reg.get_type(child), Type::MutableReference(_, _));
+                    // World-PAIR write-back (`fix_pair_writebacks` rebinds `let
+                    // (parent, __world) := Mutable.apply child`): the pair state
+                    // is `(S × (World → World))`, the world half a patch. Bind the
+                    // struct component from `.1` and re-anchor the world by
+                    // applying `.2` to the CURRENT `__world`. Keyed syntactically
+                    // (2-binder pattern whose world slot is the trailing
+                    // `__world`) — the child's registry state does not reliably
+                    // survive the destructuring projections. Every such pair
+                    // originates from `mutLiftWorld`/`mutLiftState`, whose world
+                    // half is always a patch.
+                    if pattern.len() == 2 && pattern[1].as_ref() == "__world" {
+                        let s_ty = if reg.contains(child) {
+                            match reg.get_type(child) {
+                                Type::MutableReference(_, s) => match s.as_ref() {
+                                    Type::Tuple(e) if e.len() == 2 => Some(e[0].clone()),
+                                    _ => None,
+                                },
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        };
+                        let tmp = format!("__pair_apply_{}", escape::escape_identifier(child));
+                        ctx.write("let ");
+                        ctx.write(&tmp);
+                        ctx.write(" := Mutable.apply ");
+                        ctx.write(&escape::escape_identifier(child));
+                        ctx.newline();
+                        ctx.write("let ");
+                        ctx.write(&escape::escape_identifier(&pattern[0]));
+                        ctx.write(" := ");
+                        ctx.write(&tmp);
+                        ctx.write(".1");
+                        ctx.newline();
+                        ctx.write("let ");
+                        ctx.write(&escape::escape_identifier(&pattern[1]));
+                        ctx.write(" := ");
+                        ctx.write(&tmp);
+                        ctx.write(".2 __world");
+                        ctx.newline();
+                        if let Some(s_ty) = s_ty {
+                            reg.register(pattern[0].clone(), s_ty);
+                        }
+                        if let Some(w) = ctx.program.world_functions.as_ref() {
+                            reg.register(pattern[1].clone(), w.world_type());
+                        }
+                        current = body;
+                        continue;
+                    }
+                    // Only discard when the reconstruction would actually be
+                    // ill-typed (the nested-field-borrow case the rule was
+                    // built for: the child Mutable's state type differs from
+                    // the receiver's, e.g. a TxContext Mutable into a Scenario).
+                    // A same-state child's `Mutable.apply` is well-typed and
+                    // REQUIRED: later abort conditions read the receiver (e.g.
+                    // load_inner_maybe_upgrade.aborts' version-equality assert
+                    // must see the upgraded self.version, else EWrongInnerVersion
+                    // fires spuriously across every delegation test).
+                    let state_matches_parent = reg.contains(parent)
+                        && matches!(reg.get_type(child),
+                            Type::MutableReference(_, s) if **s == *reg.get_type(parent));
+                    // `state_matches_parent` alone is NOT a reliable ill-typed
+                    // signal: the registry loses the child's concrete Mutable
+                    // state across a pair destructure (e.g. the ctx → Scenario
+                    // writeback in Test_runner's `.aborts` faces), so a
+                    // genuinely well-typed rebind can present with
+                    // `state_matches_parent == false` just like a genuinely
+                    // ill-typed one (a TxContext Mutable reconstructed into a
+                    // Scenario receiver). The two ARE distinguishable, though:
+                    // a well-typed rebind always has a Mutable-typed PARENT
+                    // (the receiver is itself threaded as a `&mut` further up
+                    // the call chain), whereas the nested-field-borrow case
+                    // this rule targets rebinds a plain (non-Mutable) parent
+                    // from a Mutable child of a *different* struct. So gate on
+                    // `parent` itself being Mutable-typed rather than trusting
+                    // the (unreliable) state-equality check.
+                    //
+                    // This was previously guarded behind `DBG_WB_RELAX`
+                    // because un-discarding surfaced a SEPARATE, real bug:
+                    // `decompose_aborts` segment helpers (`<fn>.seg_N`) got
+                    // their Mutable-typed parameters rendered behind a fresh
+                    // `{s : Type}` implicit (same as ordinary functions),
+                    // erasing the concrete state that `Mutable.apply` and
+                    // later field access on the rebound receiver depend on
+                    // (`Test_runner.lean`'s `runner : s_1` / `runner.scenario`
+                    // failure). That is fixed in `function_renderer.rs`
+                    // (segments always render their Mutable params' stored
+                    // concrete state, never a synthetic implicit), so the
+                    // relaxed guard here is now safe unconditionally.
+                    let parent_is_mutable = reg.contains(parent)
+                        && matches!(reg.get_type(parent), Type::MutableReference(_, _));
+                    let discard_in_aborts = pattern.first().is_none()
+                        && ctx.current_function_name.contains(".aborts")
+                        && child_is_mutable
+                        && !state_matches_parent
+                        && parent_is_mutable;
+                    if std::env::var("DBG_WB").is_ok() && discard_in_aborts {
+                        eprintln!(
+                            "DBG_WB fn={} parent={} : {:?} child={} : {:?}",
+                            ctx.current_function_name,
+                            parent,
+                            reg.contains(parent).then(|| reg.get_type(parent).clone()),
+                            child,
+                            reg.contains(child).then(|| reg.get_type(child).clone())
+                        );
+                    }
                     ctx.write("let ");
-                    match pattern.first() {
-                        Some(name) => ctx.write(&escape::escape_identifier(name)),
-                        // In an `.aborts` body the reconstructed parent value is
-                        // never returned (the body yields `Option MoveAbort`), and
-                        // rebinding the receiver to `Mutable.apply child` mistypes
-                        // it (the child is a borrowed sub-struct, not the parent).
-                        // Discard the reconstruction so the receiver keeps its
-                        // original (correct) type for later abort-side field reads.
-                        None if ctx.current_function_name.ends_with(".aborts") => ctx.write("_"),
-                        None => ctx.write(&escape::escape_identifier(parent)),
+                    if pattern.len() >= 2 {
+                        // Pair-kinded writeback (`fix_pair_writebacks`):
+                        // `Mutable.apply child : (S × World)` destructures into
+                        // `(parent, __world)`.
+                        ctx.tuple(pattern.iter(), "_", |ctx, p| {
+                            ctx.write(&escape::escape_identifier(p))
+                        });
+                    } else {
+                        match pattern.first() {
+                            Some(name) => ctx.write(&escape::escape_identifier(name)),
+                            None if discard_in_aborts => ctx.write("_"),
+                            None => ctx.write(&escape::escape_identifier(parent)),
+                        }
                     }
                     ctx.write(" := ");
-                    render(value, ctx, reg);
+                    if discard_in_aborts {
+                        // Emit a pure no-op rather than the ill-typed
+                        // `Mutable.set parent (Mutable.apply child)`: the write is
+                        // discarded (`_`), so the receiver is not rebound and later
+                        // reads see the original value either way — the only effect
+                        // of rendering the real reconstruction is a type-check
+                        // failure on nested field borrows (Test_runner
+                        // `advance_epoch.aborts`: `TxContext` into a `Scenario`
+                        // Mutable).
+                        ctx.write("()");
+                    } else {
+                        render(value, ctx, reg);
+                    }
                     ctx.newline();
-                    if let Some(name) = pattern.first() {
-                        if reg.contains(parent) {
-                            let ty = reg.get_type(parent).clone();
-                            reg.register(name.clone(), ty);
+                    // Pair destructures bind names that already carry their
+                    // correct registry types (`parent` here is `__world`, not
+                    // the value half) — only the single-binder rebind copies
+                    // the parent's type onto a fresh name.
+                    if pattern.len() < 2 {
+                        if let Some(name) = pattern.first() {
+                            if reg.contains(parent) {
+                                let ty = reg.get_type(parent).clone();
+                                reg.register(name.clone(), ty);
+                            }
                         }
                     }
                     current = body;
@@ -904,6 +1274,51 @@ pub fn render<'a, W: Write>(
                 // pinning X to PUnit and breaking every later use.
                 // Drop the pattern in that exact case.
                 for (inner_pattern, inner_value) in extracted_lets {
+                    // World-PAIR write-back nested in a value position (same
+                    // shape handled on the body spine above): split the pair
+                    // apply so the world half (a `World → World` patch) is
+                    // re-anchored on the current `__world`.
+                    if inner_pattern.len() == 2
+                        && inner_pattern[1].as_ref() == "__world"
+                        && matches!(&inner_value, IRNode::WriteBack { .. })
+                    {
+                        let child = if let IRNode::WriteBack { child, .. } = &inner_value {
+                            child.clone()
+                        } else {
+                            unreachable!()
+                        };
+                        let tmp = format!("__pair_apply_{}", escape::escape_identifier(&child));
+                        ctx.write("let ");
+                        ctx.write(&tmp);
+                        ctx.write(" := Mutable.apply ");
+                        ctx.write(&escape::escape_identifier(&child));
+                        ctx.newline();
+                        ctx.write("let ");
+                        ctx.write(&escape::escape_identifier(&inner_pattern[0]));
+                        ctx.write(" := ");
+                        ctx.write(&tmp);
+                        ctx.write(".1");
+                        ctx.newline();
+                        ctx.write("let ");
+                        ctx.write(&escape::escape_identifier(&inner_pattern[1]));
+                        ctx.write(" := ");
+                        ctx.write(&tmp);
+                        ctx.write(".2 __world");
+                        ctx.newline();
+                        if reg.contains(&child) {
+                            if let Type::MutableReference(_, s) = reg.get_type(&child) {
+                                if let Type::Tuple(e) = s.as_ref() {
+                                    if e.len() == 2 {
+                                        reg.register(inner_pattern[0].clone(), e[0].clone());
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(wf) = ctx.program.world_functions.as_ref() {
+                            reg.register(inner_pattern[1].clone(), wf.world_type());
+                        }
+                        continue;
+                    }
                     let writeref_info = if let IRNode::WriteRef { reference, .. } = &inner_value {
                         let ref_node = reference.as_ref();
                         let renders_unit = !matches!(ref_node, IRNode::MutableBorrow { .. })
@@ -1101,9 +1516,27 @@ pub fn render<'a, W: Write>(
                 ctx.write(h);
                 ctx.write(" : ");
             }
-            render(cond, ctx, reg);
             if dep_hyp.is_some() {
-                ctx.write(" = true");
+                ctx.write("(");
+                render(cond, ctx, reg);
+                ctx.write(") = true");
+            } else if ctx.program.world_functions.is_some()
+                && matches!(cond.as_ref(), IRNode::Var(name)
+                    if reg.contains(name) && matches!(reg.get_type(name), Type::Bool))
+            {
+                // World-mode: write the Bool→Prop coercion explicitly. The
+                // elaborated term is IDENTICAL to what the implicit coercion
+                // produces (`ite (c = true)`), but the implicit insertion is
+                // timing-sensitive: a let-bound Bool temp whose value carries
+                // postponed instance metavars (`[HasCode TyCode _]` args of
+                // generic World ops unify numeric-literal indices late) is
+                // still untyped when `if` elaborates, so the coercion never
+                // fires and elaboration fails on `Decidable (t : Bool)`.
+                ctx.write("(");
+                render(cond, ctx, reg);
+                ctx.write(") = true");
+            } else {
+                render(cond, ctx, reg);
             }
             ctx.write(" then");
             ctx.indent(true);
@@ -1382,28 +1815,49 @@ pub fn render<'a, W: Write>(
             some_branch,
             none_branch,
         } => {
-            ctx.write("match ");
-            render(scrutinee, ctx, reg);
-            ctx.write(" with");
-            ctx.indent(true);
-            // Qualify with `Option.` for the same reason as `OptionSome`
-            // / `OptionNone` above — bare `some`/`none` would resolve to
-            // namespace-local defs in modules like `MoveOption` and Lean
-            // would reject them as patterns (they're `def`s, not
-            // constructors).
-            ctx.write(&format!(
-                "| Option.some {} =>",
-                escape::escape_identifier(binding)
-            ));
-            ctx.indent(true);
-            render_if_branch(some_branch, ctx, reg);
-            ctx.dedent(false);
-            ctx.newline();
-            ctx.write("| Option.none =>");
-            ctx.indent(true);
-            render_if_branch(none_branch, ctx, reg);
-            ctx.dedent(false);
-            ctx.dedent(false);
+            // Abort-chain encoding `match s with | some __abort => some __abort
+            // | none => rest` renders as `MoveAbort.orElse s rest`, so that an
+            // `aborts = none` goal decomposes structurally via
+            // `MoveAbort.orElse_eq_none_iff` (one small goal per abort check)
+            // instead of forcing the kernel to reduce the whole nested body.
+            // Only the abort spine matches this exact triple; the while-loop
+            // early-return `MatchOption` has a different binding/branch shape
+            // and falls through to the literal `match`.
+            let is_abort_chain = binding.as_ref() == "__abort"
+                && matches!(
+                    some_branch.as_ref(),
+                    IRNode::OptionSome(inner)
+                        if matches!(inner.as_ref(), IRNode::Var(v) if v.as_ref() == "__abort")
+                );
+            if is_abort_chain {
+                ctx.write("MoveAbort.orElse ");
+                render_with_parens_if_needed(scrutinee, ctx, reg);
+                ctx.write(" ");
+                render_with_parens_if_needed(none_branch, ctx, reg);
+            } else {
+                ctx.write("match ");
+                render(scrutinee, ctx, reg);
+                ctx.write(" with");
+                ctx.indent(true);
+                // Qualify with `Option.` for the same reason as `OptionSome`
+                // / `OptionNone` above — bare `some`/`none` would resolve to
+                // namespace-local defs in modules like `MoveOption` and Lean
+                // would reject them as patterns (they're `def`s, not
+                // constructors).
+                ctx.write(&format!(
+                    "| Option.some {} =>",
+                    escape::escape_identifier(binding)
+                ));
+                ctx.indent(true);
+                render_if_branch(some_branch, ctx, reg);
+                ctx.dedent(false);
+                ctx.newline();
+                ctx.write("| Option.none =>");
+                ctx.indent(true);
+                render_if_branch(none_branch, ctx, reg);
+                ctx.dedent(false);
+                ctx.dedent(false);
+            }
         }
 
         IRNode::Inhabited => {
@@ -1448,6 +1902,40 @@ pub fn render<'a, W: Write>(
                 && matches!(reg.get_type(parent), Type::MutableReference(_, _));
             let child_is_mutable =
                 reg.contains(child) && matches!(reg.get_type(child), Type::MutableReference(_, _));
+
+            // World-stated child write-back: a `dynamic_field::borrow_mut`
+            // through an object's `&mut .id` reconstructs into the threaded
+            // `__world` (its `Mutable` state is the synthetic `World` struct),
+            // NOT into the object's UID slot. Rendering the `WriteBackEdge::Field`
+            // form here would produce `{ parent with id := Mutable.apply child }`
+            // — a `World` assigned into a UID field (or into `__world` itself,
+            // which has no `id` field). Route by whether the borrow-chain root is
+            // the world: when the parent IS `__world`, rebind it from the curried
+            // reconstruct; otherwise the object is unchanged (the df table lives
+            // in the world, which the composed return mutref threads out), so the
+            // write-back collapses to a plain copy of the parent.
+            let child_state_is_world = reg.contains(child)
+                && matches!(reg.get_type(child),
+                    Type::MutableReference(_, s) if is_world_struct_type(s, ctx));
+            // The write-back lands on `__world` when either the borrow-chain root
+            // IS the threaded world (parent `__world`, e.g. a caller applying a
+            // returned world-stated mutref whose signature-level state is a
+            // placeholder) or the child's own reconstruct state is the World
+            // struct (the in-function `&mut obj.id` df borrow).
+            let child_is_world_pair =
+                reg.contains(child) && is_world_pair_mutref(reg.get_type(child), ctx);
+            if !child_is_world_pair
+                && (child_state_is_world || (parent.as_ref() == "__world" && child_is_mutable))
+            {
+                if parent.as_ref() == "__world" {
+                    ctx.write("Mutable.apply ");
+                    ctx.write(&escape::escape_identifier(child));
+                    ctx.write(" __world");
+                } else {
+                    ctx.write(&escape::escape_identifier(parent));
+                }
+                return;
+            }
 
             // `WriteBackEdge::Field` is the field-reconstruct form. The
             // IR translator only emits it for the Reserve / Asset family
@@ -1514,7 +2002,18 @@ pub fn render<'a, W: Write>(
                             .first()
                             .map(|f| f.name == "id")
                             .unwrap_or(false);
-                    child_is_mutable && has_dynamic_fields && field0_is_id
+                    // A child borrowed from a native `dynamic_object_field::borrow_mut`
+                    // is anchored on the parent's `Object.UID` slot, not the parent
+                    // struct (unlike `dynamic_field::borrow_mut`, which Phase 1
+                    // re-anchors on the parent). Collapsing its `Mutable.apply` would
+                    // bind a `UID` into the parent variable — keep the field-update
+                    // form instead. (cetus `Pool::set_pool_status`.)
+                    let child_is_object_field_borrow =
+                        ctx.object_field_borrow_children.contains(child);
+                    child_is_mutable
+                        && has_dynamic_fields
+                        && field0_is_id
+                        && !child_is_object_field_borrow
                 };
                 if registry_match || convention_match {
                     None
@@ -1568,6 +2067,19 @@ pub fn render<'a, W: Write>(
             } else if child_is_mutable {
                 ctx.write("Mutable.apply ");
                 ctx.write(&escape::escape_identifier(child));
+                // World-stated write-back (`fix_world_stated_writebacks` rebinds
+                // `let __world := WriteBack { parent: __world, .. }`): the curried
+                // reconstruct is `α → World → World`, so feed the CURRENT
+                // `__world` to land the write on it (not the stale borrow-time
+                // world). Pair-kinded writebacks also carry `parent == __world`
+                // but are intercepted by the 2-pattern destructure in the Let
+                // handler and never reach here; guard on the child state anyway
+                // so a stray pair render is not mis-applied.
+                let world_single = parent.as_ref() == "__world"
+                    && !(reg.contains(child) && is_world_pair_mutref(reg.get_type(child), ctx));
+                if world_single {
+                    ctx.write(" __world");
+                }
             } else {
                 // Both parent and child are plain — just a variable copy
                 ctx.write(&escape::escape_identifier(child));
@@ -1746,6 +2258,42 @@ fn render_with_parens_if_needed<'a, W: Write>(
         ctx.write("(");
         render(ir, ctx, reg);
         ctx.write(")");
+    }
+}
+
+/// Render the non-proof (leading) call arguments for the client-macro call paths
+/// (loop_inv entry / callee-`requires` / callee-`requires`-precond), applying the
+/// same `Mutable.val` coercion that the normal call-rendering path applies: when
+/// the arg has `MutableReference` type but the callee's parameter does not, unwrap
+/// with `(Mutable.val …)`. Without this, threading an extra proof arg onto a call
+/// whose leading args are Mutable-wrapped mistypes the callee application.
+fn render_call_args_coerced<'a, W: Write>(
+    function: &FunctionID,
+    args: &[IRNode],
+    ctx: &mut RenderCtx<'a, W>,
+    reg: &mut VariableRegistry<'a>,
+) {
+    let param_is_mut_ref: Vec<bool> = ctx
+        .program
+        .functions
+        .get(function)
+        .signature
+        .parameters
+        .iter()
+        .map(|p| matches!(&p.param_type, Type::MutableReference(_, _)))
+        .collect();
+    for (i, arg) in args.iter().enumerate() {
+        ctx.write(" ");
+        let needs_val = i < param_is_mut_ref.len()
+            && !param_is_mut_ref[i]
+            && is_mutable_ref_expr(arg, ctx, reg);
+        if needs_val {
+            ctx.write("(Mutable.val ");
+            render_with_parens_if_needed(arg, ctx, reg);
+            ctx.write(")");
+        } else {
+            render_with_parens_if_needed(arg, ctx, reg);
+        }
     }
 }
 

@@ -17,5 +17,8 @@ pub use data::ir::{AbortSource, BinOp, BitOp, Const, IRNode, QuantifierKind, UnO
 pub use data::structure::{Field, Struct, Variant};
 pub use data::types::{TempId, Type};
 pub use data::variables::VariableRegistry;
-pub use data::{BuildMode, LoopInvHyp, Module, Program};
+pub use data::{
+    AbortsBundle, AbortsLeaf, AbortsObligation, AbortsProofNode, BuildMode, EquationLemmaSet,
+    LeanTerminationDecls, LoopInvHyp, Module, Program,
+};
 pub use data::{ModuleID, StructID};

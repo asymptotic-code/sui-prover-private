@@ -38,8 +38,13 @@ fn collect_module_imports(program: &Program, module_id: ModuleID) -> Vec<ModuleI
     let synthetic_module_ids: HashSet<ModuleID> = program
         .typed_map_functions
         .as_ref()
-        .map(|tm| std::iter::once(tm.module_id).collect())
-        .unwrap_or_default();
+        .map(|tm| tm.module_id)
+        .into_iter()
+        // The synthetic World module (world-mode) is likewise not a real
+        // file: its call surface lives in Generated/World.lean, imported by
+        // the renderer's world-usage injection.
+        .chain(program.world_functions.as_ref().map(|w| w.module_id))
+        .collect();
 
     let combined: HashSet<ModuleID> = struct_deps
         .into_iter()

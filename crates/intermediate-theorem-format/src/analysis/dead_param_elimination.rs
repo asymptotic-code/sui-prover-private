@@ -54,6 +54,13 @@ fn eliminate_dead_params_once(program: &mut Program) -> bool {
             continue;
         }
 
+        // Skip uninterpreted functions — they render as Lean `opaque`
+        // constants whose binders ARE the interface (the placeholder body
+        // uses no params, so elimination would strip them all).
+        if func.is_uninterpreted {
+            continue;
+        }
+
         // Skip .aborts functions — their parameters must match the base
         // function's parameters since callee abort composition copies args
         // from the main call to the .aborts call. Removing params would

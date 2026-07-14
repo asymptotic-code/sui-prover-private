@@ -128,33 +128,16 @@ pub fn thread_loop_inv_entry(program: &mut Program) {
         });
 
         if spec_module_id.is_none() {
-            // No resolvable spec: skip the whole `hpre` cascade. Replace the
-            // entry-call placeholder — the `hinv` argument, an `IRNode::Abort`
-            // that would otherwise render as a `MoveAbort` *value* and mistype the
-            // loop_hyp `Prop` — with `sorry`, which inhabits any `Prop`, so the
-            // entry call type-checks. (Co-located targets keep the `Abort`
-            // placeholder, which the renderer rewrites into a `requires`-derived
-            // `by`-macro at the dependent-if use-site.)
+            // No resolvable spec: skip the `hpre` cascade, but LEAVE the
+            // entry-call `Abort` placeholder in place. The renderer rewrites it
+            // into the entry `by`-macro `<module>_<base>_while_0_entry` (provided
+            // by the client's Termination file; `trivial` for a `True` loop_hyp),
+            // exactly as for co-located targets. The macro is independent of the
+            // (unresolved) spec, so it still type-checks without `hpre` in scope.
+            // The old behavior replaced the placeholder with `sorry`, which
+            // inhabited the `Prop` but transitively tainted every caller with
+            // `sorryAx` (e.g. `find_validator`, and everything routing through it).
             program.loop_inv_entry_impls.insert(impl_name);
-            let body = std::mem::take(&mut program.functions.get_mut(impl_id).body);
-            let rewritten = body.map(&mut |n| match n {
-                IRNode::Call {
-                    function,
-                    type_args,
-                    mut args,
-                } if helper_ids.contains(&function)
-                    && matches!(args.last(), Some(IRNode::Abort { .. })) =>
-                {
-                    *args.last_mut().unwrap() = IRNode::Var("sorry".into());
-                    IRNode::Call {
-                        function,
-                        type_args,
-                        args,
-                    }
-                }
-                other => other,
-            });
-            program.functions.get_mut(impl_id).body = rewritten;
             continue;
         }
 
@@ -194,12 +177,40 @@ pub fn thread_loop_inv_entry(program: &mut Program) {
             // discharge the entry hypothesis with `sorry`, which inhabits any
             // `Prop`; it is NOT `IRNode::Abort`, which now renders as a
             // `MoveAbort` *value* and would mistype the `Prop` proof parameter.
-            let sorry = IRNode::Var("sorry".into());
             let caller = program.functions.get(&caller_id);
-            let is_own_spec_companion =
-                caller.name.starts_with(&spec_name) && Some(caller.module_id) == spec_module_id;
-            let simple_args = call_arg_names(&caller.body, impl_id);
-            let hpre_arg = if is_own_spec_companion {
+            // When we can't thread a real `hpre`, leave an `Abort` placeholder:
+            // the renderer rewrites a loop_inv impl call's trailing `Abort` into
+            // `(by <impl-module>_<base>_requires)` (a client-provided macro,
+            // module-qualified so cross-module callers name the right one; trivial
+            // where the target's requires is trivially provable). `sorry` would
+            // bake sorryAx into every such caller's body.
+            let _ = impl_module_id;
+            let sorry = IRNode::Abort { code: None };
+            // A spec companion in the SAME module as the `<base>_spec.requires`
+            // hook can name it, and its correctness obligation (also same-module)
+            // forwards the `hpre` parameter for it (program_renderer handles
+            // proof_params generically). This covers the target's own spec
+            // companions AND sibling specs for *other* targets that call this one
+            // (e.g. `pool_token_exchange_rate_frozen_after_deactivation_spec`,
+            // which calls `pool_token_exchange_rate_at_epoch` — its `requires` is
+            // epoch-independent so the single threaded `hpre` discharges every
+            // call site by defeq). Cross-module callers still can't name the
+            // unqualified hook, so they fall back to `sorry`.
+            let is_threadable_companion =
+                Some(caller.module_id) == spec_module_id && caller.name.contains("_spec");
+            // The `hpre` parameter's type is `<hook> <call args>`, so those args
+            // must be the caller's own parameters — a let-bound temp would make
+            // the type reference an out-of-scope name. Reject (→ `sorry`) if any
+            // call arg isn't a caller parameter.
+            let caller_params: std::collections::HashSet<String> = caller
+                .signature
+                .parameters
+                .iter()
+                .map(|p| p.name.to_string())
+                .collect();
+            let simple_args = call_arg_names(&caller.body, impl_id)
+                .filter(|args| args.iter().all(|a| caller_params.contains(a)));
+            let hpre_arg = if is_threadable_companion {
                 if let Some(args) = simple_args {
                     let caller_entry = program.fn_proof_params.entry(caller_id).or_default();
                     if !caller_entry.iter().any(|(n, _)| n == "hpre") {

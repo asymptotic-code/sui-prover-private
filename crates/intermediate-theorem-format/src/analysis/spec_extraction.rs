@@ -109,6 +109,7 @@ pub fn extract_all_specs(program: &mut Program) {
                         is_native: false,
                         mutual_group_id: None,
                         test_expectation: None,
+                        is_uninterpreted: false,
                     });
                 }
                 SpecKind::Ensures => {
@@ -133,6 +134,7 @@ pub fn extract_all_specs(program: &mut Program) {
                         is_native: false,
                         mutual_group_id: None,
                         test_expectation: None,
+                        is_uninterpreted: false,
                     });
                 }
                 SpecKind::Asserts => {
@@ -157,6 +159,7 @@ pub fn extract_all_specs(program: &mut Program) {
                         is_native: false,
                         mutual_group_id: None,
                         test_expectation: None,
+                        is_uninterpreted: false,
                     });
                 }
             }

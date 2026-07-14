@@ -184,6 +184,14 @@ pub async fn execute(
     filter: TargetFilterOptions,
 ) -> anyhow::Result<()> {
     let model = build_model(path, Some(build_config))?;
+    if general_config.backend == Backend::Lean && model.has_errors() {
+        let mut buffer = Buffer::no_color();
+        model.report_diag(&mut buffer, codespan_reporting::diagnostic::Severity::Error);
+        return Err(anyhow::anyhow!(
+            "Move model compiled with errors.\n{}",
+            String::from_utf8_lossy(buffer.as_slice())
+        ));
+    }
     let package_targets = PackageTargets::new(&model, filter.clone(), !general_config.ci, None);
 
     general_config.skip_spec_no_abort = general_config.skip_spec_no_abort
