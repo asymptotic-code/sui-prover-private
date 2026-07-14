@@ -104,6 +104,8 @@ sui-prover --backend lean --generate-only
 
 Output is written to `output/`.
 
+See the [Lean generation example](examples/lean_demo/README.md).
+
 ## Claude Code Integration
 
 Install the Sui Prover skill for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) to get AI-assisted specification writing, verification debugging, and prover guidance.
