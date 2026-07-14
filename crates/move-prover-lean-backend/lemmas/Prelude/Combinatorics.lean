@@ -15,7 +15,7 @@ theorem nat_sublist_sum_le {l₁ l₂ : List Nat} (h : List.Sublist l₁ l₂) :
   induction h with
   | slnil => simp
   | cons a _ ih => simp only [List.sum_cons]; omega
-  | cons_cons a _ ih => simp only [List.sum_cons]; omega
+  | cons₂ a _ ih => simp only [List.sum_cons]; omega
 
 /-- Nodup-keyed select-sum monotonicity: a `Nodup` list of keys all drawn from
 `keys` selects values whose `f`-sum is bounded by the full `f`-sum over `keys`.
@@ -96,10 +96,12 @@ theorem nodup_findIdx?_eq {α β} [BEq β] [LawfulBEq β] {key : α → β} {l :
   · obtain ⟨hil, hpi, _⟩ := List.findIdx?_eq_some_iff_getElem.mp hfi
     have hkey : key l[idx] = key l[k] := by simpa using hpi
     have hidxk : idx = k := by
-      have hmap : (l.map key)[idx]'(by simpa using hil)
-          = (l.map key)[k]'(by simpa using hk) := by
-        simp only [List.getElem_map]; exact hkey
-      exact (List.getElem_inj hnd).mp hmap
+      have hidx_lt : idx < (l.map key).length := by simpa using hil
+      have hk_lt : k < (l.map key).length := by simpa using hk
+      have hmap? : (l.map key)[idx]? = (l.map key)[k]? := by
+        rw [List.getElem?_eq_getElem hidx_lt, List.getElem?_eq_getElem hk_lt,
+            List.getElem_map, List.getElem_map, hkey]
+      exact List.getElem?_inj hidx_lt hnd hmap?
     rw [hidxk]
 
 /-- `iterate step n s` applies `step` to `s` exactly `n` times. Local definition so

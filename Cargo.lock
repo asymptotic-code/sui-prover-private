@@ -529,7 +529,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "117725a109d387c937a1533ce01b450cbde6b88abceea8473c4d7a85853cda3c"
 dependencies = [
  "lazy_static",
- "windows-sys 0.59.0",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -923,7 +923,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1490,7 +1490,7 @@ dependencies = [
  "hyper 1.9.0",
  "libc",
  "pin-project-lite",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -2717,6 +2717,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "move-unit-test"
+version = "0.1.0"
+source = "git+https://github.com/asymptotic-code/sui?branch=next#512c3ff9a14608d281f4b1095508f59cf7ad6cce"
+dependencies = [
+ "anyhow",
+ "bcs",
+ "better_any",
+ "clap",
+ "codespan-reporting",
+ "colored",
+ "itertools 0.10.5",
+ "move-binary-format",
+ "move-bytecode-utils",
+ "move-command-line-common",
+ "move-compiler",
+ "move-core-types",
+ "move-ir-types",
+ "move-model 0.1.0 (git+https://github.com/asymptotic-code/sui?branch=next)",
+ "move-stdlib",
+ "move-symbol-pool",
+ "move-trace-format",
+ "move-vm-config",
+ "move-vm-runtime",
+ "parking_lot 0.11.2",
+ "rand 0.8.6",
+ "rayon",
+ "regex",
+]
+
+[[package]]
 name = "move-vm-config"
 version = "0.1.0"
 source = "git+https://github.com/asymptotic-code/sui?branch=next#512c3ff9a14608d281f4b1095508f59cf7ad6cce"
@@ -3921,7 +3951,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4463,14 +4493,19 @@ name = "sui-prover"
 version = "1.5.3"
 dependencies = [
  "anyhow",
+ "bcs",
  "clap",
  "codespan-reporting",
  "colored",
  "dir-test",
  "glob",
  "insta",
+ "intermediate-theorem-format",
  "itertools 0.13.0",
+ "libc",
  "log",
+ "move-binary-format",
+ "move-command-line-common",
  "move-compiler",
  "move-core-types",
  "move-model 0.1.0",
@@ -4479,11 +4514,15 @@ dependencies = [
  "move-prover-lean-backend",
  "move-stackless-bytecode",
  "move-symbol-pool",
+ "move-unit-test",
+ "move-vm-runtime",
  "openai_api_rust",
  "petgraph",
  "regex",
  "serde",
+ "serde_json",
  "sha2 0.10.9",
+ "stackless-to-intermediate",
  "telemetry-subscribers",
  "tempfile",
  "termcolor",
@@ -4598,7 +4637,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5412,7 +5451,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

@@ -1,10 +1,12 @@
 use codespan_reporting::diagnostic::Severity;
 use itertools::Itertools;
+use move_core_types::account_address::AccountAddress;
 use move_model::model::{FunctionEnv, GlobalEnv};
 use move_package::{
-    package_lock::PackageLock, source_package::layout::SourcePackageLayout,
-    BuildConfig as MoveBuildConfig,
+    package_lock::PackageLock, resolution::resolution_graph::ResolvedGraph,
+    source_package::layout::SourcePackageLayout, BuildConfig as MoveBuildConfig,
 };
+use std::str::FromStr;
 use move_stackless_bytecode::{
     function_target_pipeline::{
         FunctionHolderTarget, FunctionTargetPipeline, FunctionTargetsHolder,
@@ -67,6 +69,91 @@ pub fn move_model_for_package_legacy_unlocked(
     // Skip PackageLock for isolated test environments
 
     ModelBuilderLegacy::create(resolved_graph).build_model(flags)
+}
+
+pub(crate) fn apply_development_published_at(
+    graph: &mut ResolvedGraph,
+    package_path: &Path,
+) -> Result<(), anyhow::Error> {
+    let Some(package_name) = toml_string(package_path.join("Move.toml"), "package", "name")? else {
+        return Ok(());
+    };
+    let development_manifest = package_path.join("Move.development.toml");
+    if let Some(development_address) =
+        toml_string(&development_manifest, "addresses", &package_name)?
+    {
+        let development_address =
+            AccountAddress::from_str(&development_address).map_err(|err| {
+                anyhow::anyhow!(
+                    "invalid Move.development.toml address `{}` for `{}`: {}",
+                    development_address,
+                    package_name,
+                    err
+                )
+            })?;
+        if development_address != AccountAddress::ZERO {
+            return Ok(());
+        }
+    }
+    let Some(published_at) = toml_string(&development_manifest, "package", "published-at")? else {
+        return Ok(());
+    };
+    let address = AccountAddress::from_str(&published_at).map_err(|err| {
+        anyhow::anyhow!(
+            "invalid Move.development.toml published-at address `{}`: {}",
+            published_at,
+            err
+        )
+    })?;
+    let root = graph.root_package();
+    if let Some(pkg) = graph.package_table.get_mut(&root) {
+        let package_name = package_name.into();
+        let should_apply = pkg
+            .resolved_table
+            .get(&package_name)
+            .map_or(true, |current| current == &AccountAddress::ZERO);
+        if should_apply {
+            pkg.resolved_table.insert(package_name, address);
+        }
+    }
+    Ok(())
+}
+
+fn toml_string(
+    path: impl AsRef<Path>,
+    section: &str,
+    key: &str,
+) -> Result<Option<String>, anyhow::Error> {
+    let path = path.as_ref();
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return Ok(None);
+    };
+    let mut in_section = false;
+    for line in contents.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(name) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+            in_section = name.trim() == section;
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        let Some((found_key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if found_key.trim() != key {
+            continue;
+        }
+        let value = value.trim();
+        if let Some(value) = value.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+            return Ok(Some(value.to_string()));
+        }
+        anyhow::bail!("expected string value for `{}` in {}", key, path.display());
+    }
+    Ok(None)
 }
 
 fn resolve_lock_file_path(

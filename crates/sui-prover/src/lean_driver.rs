@@ -14,8 +14,11 @@ use move_stackless_bytecode::options::ProverOptions;
 use move_stackless_bytecode::package_targets::PackageTargets;
 
 use crate::lean_pipeline_overrides::{
-    LeanSpecInstrumentationProcessor, LeanVerificationAnalysisProcessor,
+    LeanSpecInstrumentationProcessor, LeanVerificationAnalysisProcessor, TestFilter,
 };
+use std::path::{Path, PathBuf};
+
+use crate::prove::{BuildConfig, TestConfig};
 
 fn init_global_number_state(model: &GlobalEnv, prover_options: &ProverOptions) {
     let mut global_state = GlobalNumberOperationState::new_with_options(prover_options.clone());
@@ -41,6 +44,8 @@ fn build_lean_pipeline(
     keep_functions: std::collections::BTreeSet<
         move_model::model::QualifiedId<move_model::model::FunId>,
     >,
+    test_mode: bool,
+    test_filter: Option<TestFilter>,
 ) -> FunctionTargetPipeline {
     use move_stackless_bytecode::{
         borrow_analysis::BorrowAnalysisProcessor, clean_and_optimize::CleanAndOptimizeProcessor,
@@ -64,7 +69,11 @@ fn build_lean_pipeline(
     let mut processors: Vec<
         Box<dyn move_stackless_bytecode::function_target_pipeline::FunctionTargetProcessor>,
     > = vec![
-        LeanVerificationAnalysisProcessor::new(include_all, keep_functions),
+        if test_mode {
+            LeanVerificationAnalysisProcessor::new_for_testing(include_all, test_filter, keep_functions)
+        } else {
+            LeanVerificationAnalysisProcessor::new(include_all, keep_functions)
+        },
         SpecGlobalVariableAnalysisProcessor::new(),
         SpecPurityAnalysis::new(),
         DebugInstrumenter::new(),
@@ -142,6 +151,8 @@ fn create_and_process_targets(
     prover_options: &ProverOptions,
     target: FunctionHolderTarget,
     include_all: bool,
+    test_mode: bool,
+    test_filter: Option<TestFilter>,
 ) -> FunctionTargetsHolder {
     let mut targets = FunctionTargetsHolder::new(prover_options.clone(), package_targets, target);
 
@@ -165,6 +176,8 @@ fn create_and_process_targets(
         prover_options,
         include_all,
         world_mode_keep_functions(model),
+        test_mode,
+        test_filter,
     );
     let _ = pipeline.run_with_hook(
         model,
@@ -279,6 +292,7 @@ pub async fn execute_backend_lean(
     package_targets: &PackageTargets,
     include_all: bool,
     generate_only: bool,
+    output_dir: Option<&Path>,
 ) -> anyhow::Result<()> {
     let prover_options = ProverOptions {
         skip_loop_analysis: true,
@@ -287,7 +301,7 @@ pub async fn execute_backend_lean(
 
     // After build_model(), cwd is the package root.
     let package_dir = std::env::current_dir()?;
-    let output_dir = package_dir.join("output");
+    let output_dir = resolve_output_dir(output_dir, &package_dir)?;
 
     let boogie_proven_names: std::collections::HashSet<String> = package_targets
         .boogie_proven_specs()
@@ -304,6 +318,8 @@ pub async fn execute_backend_lean(
             &prover_options,
             FunctionHolderTarget::All,
             include_all,
+            /*test_mode=*/ false,
+            /*test_filter=*/ None,
         )
     } else {
         // Keep each module's spec-to-target map one-to-one, then merge the
@@ -316,6 +332,8 @@ pub async fn execute_backend_lean(
                 &prover_options,
                 FunctionHolderTarget::Module(module_id),
                 include_all,
+                /*test_mode=*/ false,
+                /*test_filter=*/ None,
             );
             match merged.as_mut() {
                 Some(accumulator) => accumulator.merge_targets_from(targets),
@@ -335,4 +353,140 @@ pub async fn execute_backend_lean(
         derive_ghost_native_seed(&model, package_targets),
     )
     .await
+}
+
+fn resolve_output_dir(output_dir: Option<&Path>, package_dir: &Path) -> anyhow::Result<PathBuf> {
+    match output_dir {
+        Some(path) => {
+            std::fs::create_dir_all(path)?;
+            Ok(path.canonicalize()?)
+        }
+        None => Ok(package_dir.join("output")),
+    }
+}
+
+fn read_user_package_name() -> Option<String> {
+    let manifest = std::fs::read_to_string("Move.toml").ok()?;
+    for line in manifest.lines() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("name") {
+            let r = rest.trim_start();
+            if let Some(r) = r.strip_prefix('=') {
+                return Some(r.trim().trim_matches('"').to_string());
+            }
+        }
+    }
+    None
+}
+
+/// `--backend lean --test`: generate test-mode Lean (option-shape `.aborts`
+/// companions plus full `#[test]` bodies), build what the drivers need, then
+/// run the Move `#[test]` conformance suite through Lean via `lean_test`.
+pub async fn execute_backend_lean_test(
+    model: GlobalEnv,
+    package_targets: &PackageTargets,
+    build_config: &BuildConfig,
+    test_config: &TestConfig,
+    generate_only: bool,
+    output_dir: Option<&Path>,
+) -> anyhow::Result<()> {
+    let overall_start = std::time::Instant::now();
+    let prover_options = ProverOptions {
+        skip_loop_analysis: true,
+        ..ProverOptions::default()
+    };
+
+    // After build_model(), cwd is the package root.
+    let package_dir = std::env::current_dir()?;
+    let base_output_dir = resolve_output_dir(output_dir, &package_dir)?;
+
+    init_global_number_state(&model, &prover_options);
+
+    // Compile up-front so a malformed regex fails fast.
+    let test_filter = test_config
+        .filter
+        .as_deref()
+        .map(TestFilter::from_str)
+        .transpose()?;
+
+    let targets = create_and_process_targets(
+        &model,
+        package_targets,
+        &prover_options,
+        FunctionHolderTarget::All,
+        /*include_all=*/ false,
+        /*test_mode=*/ true,
+        test_filter,
+    );
+
+    // Test-mode emit: option-shape `.aborts` companions plus full
+    // `#[test]` bodies. `generate_only=true` here skips the blanket
+    // `lake build` — the model includes every dep package's `*_tests`
+    // modules, which the renderer doesn't handle, and a full build
+    // would fail on dep files no user test imports.
+    move_prover_lean_backend::run_backend_with_options(
+        &model,
+        &targets,
+        &base_output_dir,
+        &package_dir,
+        true,
+        true, // aborts_as_option
+        derive_ghost_native_seed(&model, package_targets),
+    )
+    .await?;
+
+    if generate_only {
+        eprintln!("Total took: {}ms", overall_start.elapsed().as_millis());
+        return Ok(());
+    }
+
+    // Build only what the test drivers need so `lake env lean` can resolve
+    // their imports: `Prelude`, `Generated` (if present), and the user's
+    // own package. Framework/dependency libs ship hand-written lemma files
+    // that reference `.aborts` companions per-package pruning drops, so we
+    // don't build them as standalone targets.
+    let mut targets_to_build: Vec<String> = vec!["Prelude".to_string()];
+    if base_output_dir.join("Generated").is_dir() {
+        targets_to_build.push("Generated".to_string());
+    }
+    if let Some(pkg) = read_user_package_name() {
+        if base_output_dir.join(&pkg).is_dir() {
+            targets_to_build.push(pkg);
+        }
+    }
+    let output_str = base_output_dir
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("Invalid output path"))?;
+    for target in &targets_to_build {
+        if let Err(err) =
+            move_prover_lean_backend::run_lake_build_targets(output_str, &[target.clone()]).await
+        {
+            eprintln!("skipping `lake build {target}` for --test:\n{err}");
+        }
+    }
+
+    let test_passed = crate::lean_test::run_lean_tests(
+        &model,
+        &targets,
+        &base_output_dir,
+        &package_dir,
+        build_config,
+        test_config,
+        /*new_pipeline=*/ false,
+    )?;
+    if test_config.type_check_only {
+        eprintln!(
+            "Total took: {}ms (type-check-only)",
+            overall_start.elapsed().as_millis()
+        );
+        if !test_passed {
+            anyhow::bail!("one or more Lean test drivers failed to type-check");
+        }
+        return Ok(());
+    }
+    eprintln!("Total took: {}ms", overall_start.elapsed().as_millis());
+    if !test_passed {
+        anyhow::bail!("one or more Lean unit tests failed");
+    }
+    Ok(())
 }

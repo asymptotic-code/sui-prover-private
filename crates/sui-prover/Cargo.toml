@@ -30,6 +30,12 @@ move-model.workspace = true
 move-symbol-pool.workspace = true
 move-stackless-bytecode.workspace = true
 move-prover-lean-backend.workspace = true
+move-binary-format.workspace = true
+move-command-line-common.workspace = true
+move-unit-test.workspace = true
+move-vm-runtime.workspace = true
+stackless-to-intermediate.workspace = true
+intermediate-theorem-format.workspace = true
 glob.workspace = true
 insta.workspace = true
 termcolor.workspace = true
@@ -37,6 +43,9 @@ sha2.workspace = true
 petgraph.workspace = true
 dir-test.workspace = true
 tempfile.workspace = true
+bcs.workspace = true
+libc.workspace = true
+serde_json.workspace = true
 
 tokio = { workspace = true, features = ["full"] }
 

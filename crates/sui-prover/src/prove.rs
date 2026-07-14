@@ -30,9 +30,14 @@ use std::{
 
 impl From<BuildConfig> for MoveBuildConfig {
     fn from(config: BuildConfig) -> Self {
+        let mut modes = vec![ModeAttribute::VERIFY_ONLY.into()];
+        if config.test {
+            modes.push(ModeAttribute::TEST.into());
+        }
+
         Self {
             dev_mode: true,
-            test_mode: false,
+            test_mode: config.test,
             json_errors: false,
             generate_docs: false,
             silence_warnings: true,
@@ -49,7 +54,7 @@ impl From<BuildConfig> for MoveBuildConfig {
             additional_named_addresses: config.additional_named_addresses,
             save_disassembly: false,
             implicit_dependencies: BTreeMap::new(),
-            modes: vec![ModeAttribute::VERIFY_ONLY.into()],
+            modes,
             force_lock_file: false,
         }
     }
@@ -134,9 +139,14 @@ pub struct GeneralConfig {
     /// Stream Boogie trace output in real time (passes -trace -traceverify to Boogie)
     #[clap(name = "trace", long, global = true)]
     pub trace: bool,
+
+    /// Output directory for generated backend artifacts (e.g. Lean sources).
+    /// Defaults to `<package_dir>/output` when unset.
+    #[clap(name = "output-dir", long = "output-dir", global = true)]
+    pub output_dir: Option<PathBuf>,
 }
 
-#[derive(Args, Default)]
+#[derive(Args, Default, Clone)]
 #[clap(next_help_heading = "Build Options (subset of sui move build)")]
 pub struct BuildConfig {
     /// Installation directory for compiled artifacts. Defaults to current directory.
@@ -171,6 +181,55 @@ pub struct BuildConfig {
     /// Additional named address mapping. Useful for tools in rust
     #[clap(skip)]
     pub additional_named_addresses: BTreeMap<String, AccountAddress>,
+
+    /// Run every Move `#[test]` through Lean execution (only supported
+    /// with `--backend lean`) and emit a `move test`-style PASS/FAIL
+    /// report. Each test renders into a self-contained driver, runs via
+    /// `lake env lean --run`, and matches against `#[expected_failure]`.
+    #[clap(name = "test", long = "test", global = true)]
+    pub test: bool,
+}
+
+/// `--test` pipeline options (Lean backend only). Only meaningful with
+/// `--test`; ignored otherwise.
+#[derive(Args, Default, Clone)]
+#[clap(next_help_heading = "Test Options (only with --test)")]
+pub struct TestConfig {
+    /// Regex over test qnames (`<module>::<test>`). Module-name-contains
+    /// the literal short-circuits the whole module. Scopes both the
+    /// runner AND the IR build (only matching tests + callees emit).
+    /// Has no effect without `--test`.
+    #[clap(name = "test-filter", long = "test-filter", global = true)]
+    pub filter: Option<String>,
+
+    /// Number of rayon worker threads the upstream move-unit-test
+    /// runner uses to execute `#[test]`s in parallel within a package.
+    /// Defaults to upstream's default (8). Has no effect without
+    /// `--test`.
+    #[clap(name = "test-threads", long = "test-threads", global = true)]
+    pub num_threads: Option<usize>,
+
+    /// Stop after `lake build` (which type-checks every Spec-emitted
+    /// package); skip the per-test `lake env lean --run` invocations.
+    /// CI gate that the test pipeline produces well-typed Lean. Has
+    /// no effect without `--test`.
+    #[clap(name = "type-check-only", long = "type-check-only", global = true)]
+    pub type_check_only: bool,
+
+    /// Per-test wall-clock timeout in seconds for the
+    /// `lake env lean --run` invocation. When a single test driver
+    /// exceeds this, the subprocess is killed and the test is
+    /// reported as an abort with `code = 0` (same shape the harness
+    /// uses for assertion failures) so the runner continues with
+    /// the rest of the package. `0` (the default) disables the
+    /// timeout. Has no effect without `--test`.
+    #[clap(
+        name = "test-timeout",
+        long = "test-timeout",
+        global = true,
+        default_value_t = 0u64
+    )]
+    pub per_test_timeout_secs: u64,
 }
 
 pub const DEFAULT_EXECUTION_TIMEOUT_SECONDS: usize = 45;
@@ -182,8 +241,13 @@ pub async fn execute(
     build_config: BuildConfig,
     boogie_config: Option<String>,
     filter: TargetFilterOptions,
+    test_config: TestConfig,
 ) -> anyhow::Result<()> {
-    let model = build_model(path, Some(build_config))?;
+    if build_config.test && general_config.backend != Backend::Lean {
+        anyhow::bail!("`--test` is only supported with `--backend lean`");
+    }
+
+    let model = build_model(path, Some(build_config.clone()))?;
     if general_config.backend == Backend::Lean && model.has_errors() {
         let mut buffer = Buffer::no_color();
         model.report_diag(&mut buffer, codespan_reporting::diagnostic::Severity::Error);
@@ -203,6 +267,18 @@ pub async fn execute(
         return Ok(());
     }
 
+    if build_config.test {
+        return crate::lean_driver::execute_backend_lean_test(
+            model,
+            &package_targets,
+            &build_config,
+            &test_config,
+            general_config.generate_only,
+            general_config.output_dir.as_deref(),
+        )
+        .await;
+    }
+
     match general_config.backend {
         Backend::Boogie => {
             execute_backend_boogie(model, &general_config, remote_config, boogie_config, filter)
@@ -214,6 +290,7 @@ pub async fn execute(
                 &package_targets,
                 /*include_all=*/ false,
                 general_config.generate_only,
+                general_config.output_dir.as_deref(),
             )
             .await
         }

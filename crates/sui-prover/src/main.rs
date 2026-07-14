@@ -3,13 +3,14 @@ use std::path::PathBuf;
 use clap::*;
 use colored::Colorize;
 use move_stackless_bytecode::target_filter::TargetFilterOptions;
-use prove::{execute, BuildConfig, GeneralConfig};
+use prove::{execute, BuildConfig, GeneralConfig, TestConfig};
 use remote_config::RemoteConfig;
 use tracing::debug;
 
 mod build_model;
 mod lean_driver;
 mod lean_pipeline_overrides;
+mod lean_test;
 mod legacy_builder;
 mod llm_explain;
 mod prompts;
@@ -49,6 +50,10 @@ pub struct Args {
     /// Remote prover options
     #[clap(flatten)]
     pub remote_config: RemoteConfig,
+
+    /// Lean `--test` options
+    #[clap(flatten)]
+    pub test_config: TestConfig,
 }
 
 #[tokio::main]
@@ -77,6 +82,7 @@ async fn main() {
             args.build_config,
             args.boogie_config,
             args.filter_config,
+            args.test_config,
         )
         .await
     };
