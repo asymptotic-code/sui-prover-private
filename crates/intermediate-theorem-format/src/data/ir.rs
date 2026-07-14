@@ -1583,7 +1583,21 @@ impl IRNode {
             IRNode::ToProp(_) => Type::Prop,
             IRNode::ToBool(_) => Type::Bool,
             IRNode::ArithOverflowCheck { .. } => Type::Bool,
-            IRNode::WriteBack { .. } => Type::Tuple(vec![]),
+            IRNode::WriteBack { child, .. } => {
+                // A pair-kinded writeback (world_threading::fix_pair_writebacks)
+                // destructures `Mutable.apply child : (S × World)` into a
+                // 2-element pattern, so its value type is the child's Mutable
+                // STATE pair. Every other writeback is a unit-typed side effect
+                // (the empty-pattern parent-rebind convention).
+                if reg.contains(child) {
+                    if let Type::MutableReference(_, state) = reg.get_type(child) {
+                        if matches!(state.as_ref(), Type::Tuple(elems) if elems.len() == 2) {
+                            return state.as_ref().clone();
+                        }
+                    }
+                }
+                Type::Tuple(vec![])
+            }
 
             IRNode::MutableCompose { inner, outer } => {
                 let inner_type = IRNode::Var(inner.clone()).get_type(reg);
@@ -1599,9 +1613,22 @@ impl IRNode {
                 }
             }
 
+            // World-mode typed reads (`analysis/world_threading.rs`) bind
+            // `match World.getDf … with | some v => v | none => abort` at
+            // Let-value positions, so the match must type. Its type is the
+            // scrutinee's Option payload (the abort branch inhabits any
+            // type). Other MatchOption shapes (the while-loop early-return
+            // encoding) never sit at typed positions and keep panicking.
+            IRNode::MatchOption { scrutinee, .. } => match scrutinee.get_type(reg) {
+                Type::Option(inner) => *inner,
+                other => panic!(
+                    "get_type on MatchOption with non-Option scrutinee type {:?}",
+                    other
+                ),
+            },
+
             IRNode::OptionSome(_)
             | IRNode::OptionNone
-            | IRNode::MatchOption { .. }
             | IRNode::Inhabited
             | IRNode::Abort { .. }
             | IRNode::MoveAbortValue { .. } => {

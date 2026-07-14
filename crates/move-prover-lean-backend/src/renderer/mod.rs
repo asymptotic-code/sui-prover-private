@@ -7,12 +7,13 @@
 //! The renderer is intentionally "dumb" - it pattern matches IR nodes
 //! and emits corresponding Lean text without complex analysis.
 
+pub mod cast_quarantine;
 mod context;
 pub mod dyn_type_universe;
 pub mod function_renderer;
 mod helpers;
 mod lean_writer;
-mod program_renderer;
+pub mod program_renderer;
 pub mod render;
 mod struct_renderer;
 pub mod type_renderer;
@@ -33,6 +34,10 @@ pub fn render_expression_to_string(ir: &IRNode, func: &Function, program: &Progr
     let mut registry = func.param_registry(program);
     let writer = LeanWriter::new(String::new());
     let mut ctx = context::RenderCtx::new(program, func.module_id, None, writer, HashSet::new());
+    // Type parameters must render with the def-binder escaping (`t_tv0`),
+    // not the bare fallback (`tv0`) — frame/footprint expressions reference
+    // the enclosing generic def's binders.
+    ctx.with_type_params(&func.signature.type_params);
     render::render(ir, &mut ctx, &mut registry);
     ctx.into_writer().into_inner()
 }

@@ -3,50 +3,74 @@
 
 //! Analysis and optimization passes for TheoremIR
 
+mod callee_requires_entry;
+mod callee_requires_precond;
 mod cleanup;
 mod constant_folding;
 mod dead_code_removal;
 pub(crate) mod dead_param_elimination;
+pub mod decompose_aborts;
 mod deep_nesting;
 mod dependency_order;
 pub mod dynamic_field_rewriting;
 mod early_return;
+pub mod equation_lemmas;
+pub mod frame_lemmas;
+pub mod ghost_threading;
 mod import_collection;
 mod inject_arithmetic_aborts;
+mod lean_termination;
 mod logical_simplification;
+mod loop_body_extraction;
 mod loop_inv_entry;
 pub mod mutable_threading;
 mod native_shadowing;
+mod nested_loop_termination;
 mod post_state_rename;
 mod prop_inference;
 mod spec_extraction;
 mod spec_type_conversion;
+mod stored_value_invariants;
 mod temp_inlining;
+pub mod tx_context_natives;
 mod validation;
+pub mod world_threading;
 
+pub use callee_requires_entry::thread_callee_requires_entry;
+pub use callee_requires_precond::thread_callee_requires_precond;
 pub use cleanup::{
-    coalesce_shadow_self_noop_updates, fix_writeref_empty_patterns, flatten_sequential_ifs,
-    lift_bool_tails_to_prop, lift_post_threading_phis, normalize_unit_branches,
-    propagate_field_snapshot_writebacks, wrap_mutable_if_branch_terminals,
+    coalesce_shadow_self_noop_updates, fix_discarded_reconstruct_writebacks,
+    fix_writeref_empty_patterns, flatten_sequential_ifs, lift_bool_tails_to_prop,
+    lift_post_threading_phis, normalize_unit_branches, propagate_field_snapshot_writebacks,
+    wrap_mutable_if_branch_terminals,
 };
 pub use constant_folding::fold_constants;
 pub use dead_code_removal::remove_dead_code;
+pub use decompose_aborts::decompose_aborts;
+pub use decompose_aborts::decompose_ensures;
 pub use deep_nesting::flatten_deep_nesting;
 pub use dependency_order::order_by_dependencies;
 pub use early_return::{
     fix_undefined_vars_in_aborts, fold_early_returns, fold_early_returns_inner,
-    replace_inhabited_let_values, replace_inhabited_with_false, rewrite_asserts_in_aborts,
-    simplify_aborts, strip_abort_branches, strip_unreachable_after_tail_calls,
+    inline_abort_only_after_calls, replace_inhabited_let_values, replace_inhabited_with_false,
+    rewrite_asserts_in_aborts, simplify_aborts, strip_abort_branches,
+    strip_unreachable_after_tail_calls,
 };
+pub use equation_lemmas::compute_equation_lemmas;
+pub use frame_lemmas::compute_frame_lemmas;
 pub use import_collection::collect_imports;
 pub use inject_arithmetic_aborts::inject_arithmetic_aborts;
+pub use lean_termination::thread_lean_terminations;
 pub use logical_simplification::simplify as logical_simplify;
+pub use loop_body_extraction::extract_loop_bodies;
 pub use loop_inv_entry::thread_loop_inv_entry;
 pub use native_shadowing::{mark_native_shadowed, mark_native_shadowed_auto};
+pub use nested_loop_termination::thread_nested_loop_termination;
 pub use post_state_rename::distinguish_param_rebinds_in_ensures;
 pub use prop_inference::{infer_prop_returns, strip_quantifiers_in_aborts, validate_sorts};
 pub use spec_extraction::extract_all_specs;
 pub use spec_type_conversion::generate_spec_type_conversions;
+pub use stored_value_invariants::thread_stored_value_invariants;
 pub use temp_inlining::{inline_temps, inline_temps_simple, propagate_copies};
 pub use validation::{validate_function, validate_program, ValidationError};
 

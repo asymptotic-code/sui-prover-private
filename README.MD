@@ -96,6 +96,14 @@ Run from the `move.toml` directory:
 sui-prover
 ```
 
+### Generate Lean
+
+```bash
+sui-prover --backend lean --generate-only
+```
+
+Output is written to `output/`.
+
 ## Claude Code Integration
 
 Install the Sui Prover skill for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) to get AI-assisted specification writing, verification debugging, and prover guidance.

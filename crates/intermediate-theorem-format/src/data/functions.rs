@@ -44,6 +44,24 @@ pub enum ProofParamType {
     /// so the application reflects the *final* parameter list (after
     /// dead-param elimination), with the renderer's identifier escaping.
     LoopInvHook(String),
+    /// A stored-value data-invariant hypothesis: `TypedMap.all <K> <V> <pred>
+    /// <map_expr>`, where `map_expr` is a field path over the carrying
+    /// function's value params (built by `stored_value_invariants`) and the key
+    /// / value types are rendered by the renderer (which owns type-to-Lean
+    /// formatting). See `analysis/stored_value_invariants.rs`.
+    DataInv {
+        key_type: Type,
+        value_type: Type,
+        pred: String,
+        map_expr: String,
+    },
+    /// The world-mode face of the stored-value invariant (unified-backend
+    /// design §7, Phase 5): renders `Prover.World.World.allDf __world
+    /// (World.uidNat <parent_expr>) <pred>`, where `parent_expr` is a UID
+    /// field path over the carrying function's value params. The stored value
+    /// type is implicit — `allDf` infers it from the predicate's domain — so
+    /// no K/V types are carried. Produced only for `world_mode` packages.
+    DataInvWorld { parent_expr: String, pred: String },
 }
 
 /// A proof-typed parameter appended after a function's value parameters. These
@@ -112,6 +130,11 @@ pub struct Function {
 
     /// If this function is a Move `#[test]`, the expectation it encodes.
     pub test_expectation: Option<TestExpectation>,
+
+    /// Move `#[ext(pure, uninterpreted)]`: render as a Lean `opaque` constant
+    /// (binders + return type, no body) so proofs get congruence-only
+    /// reasoning. The placeholder Move body is never emitted or inlined.
+    pub is_uninterpreted: bool,
 }
 
 impl Function {

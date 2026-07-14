@@ -921,6 +921,17 @@ pub fn replace_inhabited_let_values(node: IRNode) -> IRNode {
                 .map(|(idx, bindings, body)| (idx, bindings, replace_inhabited_let_values(body)))
                 .collect(),
         },
+        IRNode::MatchOption {
+            scrutinee,
+            binding,
+            some_branch,
+            none_branch,
+        } => IRNode::MatchOption {
+            scrutinee: Box::new(replace_inhabited_let_values(*scrutinee)),
+            binding,
+            some_branch: Box::new(replace_inhabited_let_values(*some_branch)),
+            none_branch: Box::new(replace_inhabited_let_values(*none_branch)),
+        },
         other => other,
     }
 }
@@ -942,6 +953,16 @@ fn contains_inhabited(node: &IRNode) -> bool {
         IRNode::Match { scrutinee, cases } => {
             contains_inhabited(scrutinee)
                 || cases.iter().any(|(_, _, body)| contains_inhabited(body))
+        }
+        IRNode::MatchOption {
+            scrutinee,
+            some_branch,
+            none_branch,
+            ..
+        } => {
+            contains_inhabited(scrutinee)
+                || contains_inhabited(some_branch)
+                || contains_inhabited(none_branch)
         }
         IRNode::BinOp { lhs, rhs, .. } => contains_inhabited(lhs) || contains_inhabited(rhs),
         IRNode::UnOp { operand, .. } => contains_inhabited(operand),
@@ -1054,4 +1075,134 @@ pub fn fix_undefined_vars_in_aborts(node: IRNode, initial_scope: &[String]) -> I
     // Start with initial scope (function parameters) and fix undefined references
     let scope: BTreeSet<TempId> = initial_scope.iter().map(|s| Rc::from(s.as_str())).collect();
     fix_inner(node, &scope)
+}
+
+/// Inline calls to abort-only `<while>.after` loop-continuation helpers.
+///
+/// A `<f>.while_N.after` helper whose Move source falls through to `abort`
+/// has a bare-`Abort` body. `mutable_threading`'s demotion (step 4b) then
+/// strips the `Mutable` wrapper off its return type — because an abort body
+/// exposes no mutref result — while its `<while>` sibling keeps the wrapper
+/// (its found-branch has a real `Mutable.compose`). The sibling's exit call
+/// `let r := <while>.after …; (r.1, …)` then feeds a plain value where a
+/// `Mutable` is expected ("Application type mismatch"; cetus
+/// `borrow_mut_rewarder`).
+///
+/// The call always aborts, so this pass replaces the enclosing `let` (whose
+/// value is the call) — and the now-unreachable destructure that follows —
+/// with an inline `Abort`. Lean unifies that with the found-branch's inferred
+/// `Mutable` type, so no return-type annotation (and no unreliable state
+/// placeholder) is needed. Only value-mode bodies are rewritten; `.aborts` /
+/// `.ensures` / `.requires` / `.asserts` faces are skipped, where an abort
+/// must feed the Prop/Option abort shape rather than collapse to `sorry`.
+pub fn inline_abort_only_after_calls(program: &mut crate::Program) {
+    use std::collections::BTreeMap;
+
+    let targets: BTreeMap<crate::FunctionID, Option<IRNode>> = program
+        .functions
+        .iter()
+        .filter(|(_, f)| !f.is_native && f.name.contains(".after"))
+        .filter_map(|(fid, f)| abort_tail_code(&f.body).map(|code| (fid, code)))
+        .collect();
+    if targets.is_empty() {
+        return;
+    }
+
+    let ids: Vec<crate::FunctionID> = program.functions.iter_ids().collect();
+    for id in ids {
+        let f = program.functions.get(&id);
+        if f.is_native {
+            continue;
+        }
+        let nm = &f.name;
+        if nm.contains(".aborts")
+            || nm.contains(".ensures")
+            || nm.contains(".requires")
+            || nm.contains(".asserts")
+        {
+            continue;
+        }
+        let body = std::mem::take(&mut program.functions.get_mut(id).body);
+        program.functions.get_mut(id).body = inline_after_calls_inner(body, &targets);
+    }
+}
+
+/// If `node` always aborts (its tail is an `Abort`), return that abort's code.
+fn abort_tail_code(node: &IRNode) -> Option<Option<IRNode>> {
+    match node {
+        IRNode::Abort { code } => Some(code.as_deref().cloned()),
+        IRNode::Let { body, .. } => abort_tail_code(body),
+        _ => None,
+    }
+}
+
+fn call_is_target(
+    node: &IRNode,
+    targets: &std::collections::BTreeMap<crate::FunctionID, Option<IRNode>>,
+) -> Option<Option<IRNode>> {
+    match node {
+        IRNode::Call { function, .. } => targets.get(function).cloned(),
+        _ => None,
+    }
+}
+
+fn inline_after_calls_inner(
+    node: IRNode,
+    targets: &std::collections::BTreeMap<crate::FunctionID, Option<IRNode>>,
+) -> IRNode {
+    match node {
+        IRNode::Let {
+            pattern,
+            value,
+            body,
+        } => {
+            if let Some(code) = call_is_target(&value, targets) {
+                return IRNode::Abort {
+                    code: code.map(Box::new),
+                };
+            }
+            IRNode::Let {
+                pattern,
+                value: Box::new(inline_after_calls_inner(*value, targets)),
+                body: Box::new(inline_after_calls_inner(*body, targets)),
+            }
+        }
+        IRNode::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            let fix = |n: IRNode| -> IRNode {
+                if let Some(code) = call_is_target(&n, targets) {
+                    IRNode::Abort {
+                        code: code.map(Box::new),
+                    }
+                } else {
+                    inline_after_calls_inner(n, targets)
+                }
+            };
+            IRNode::If {
+                cond,
+                then_branch: Box::new(fix(*then_branch)),
+                else_branch: Box::new(fix(*else_branch)),
+            }
+        }
+        IRNode::Match { scrutinee, cases } => IRNode::Match {
+            scrutinee,
+            cases: cases
+                .into_iter()
+                .map(|(idx, bindings, body)| {
+                    let body = if let Some(code) = call_is_target(&body, targets) {
+                        IRNode::Abort {
+                            code: code.map(Box::new),
+                        }
+                    } else {
+                        inline_after_calls_inner(body, targets)
+                    };
+                    (idx, bindings, body)
+                })
+                .collect(),
+        },
+        other => other,
+    }
 }

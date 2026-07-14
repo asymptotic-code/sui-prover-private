@@ -283,6 +283,7 @@ pub fn emit_while(
             is_native: false,
             mutual_group_id: None,
             test_expectation: None,
+            is_uninterpreted: false,
         },
     );
 
@@ -313,6 +314,7 @@ pub fn emit_while(
             is_native: false,
             mutual_group_id: None,
             test_expectation: None,
+            is_uninterpreted: false,
         },
     );
 

@@ -35,6 +35,7 @@ pub fn build_function(
     let name = builder.symbol_str(func_env.get_name()).to_string();
     let is_native = func_env.is_native();
     let test_expectation = detect_test_expectation(func_env);
+    let is_uninterpreted = detect_uninterpreted(func_env);
 
     // NOTE: fold_early_returns is NOT run on `body` here. It runs
     // post-mutable-threading in the optimize_all() pass. Running it
@@ -156,6 +157,7 @@ pub fn build_function(
         is_native,
         mutual_group_id: None,
         test_expectation,
+        is_uninterpreted,
     });
 
     // Aborts function
@@ -174,9 +176,29 @@ pub fn build_function(
         is_native: false,
         test_expectation: None,
         mutual_group_id: None,
+        is_uninterpreted: false,
     });
 
     functions
+}
+
+/// Detect a `#[ext(..., uninterpreted, ...)]` attribute on `func_env`: the
+/// function is an uninterpreted spec helper — its placeholder Move body is
+/// never emitted; the renderer declares a Lean `opaque` constant instead.
+fn detect_uninterpreted(func_env: &FunctionEnv) -> bool {
+    use move_compiler::shared::known_attributes::KnownAttribute;
+    if let Some(attr) = func_env
+        .get_toplevel_attributes()
+        .get_(&AttributeKind_::External)
+    {
+        if let KnownAttribute::External(ext) = &attr.value {
+            return ext
+                .attrs
+                .iter()
+                .any(|(_, name, _)| name.as_str() == "uninterpreted");
+        }
+    }
+    false
 }
 
 /// Detect a `#[test]` attribute on `func_env` and, if present, return the

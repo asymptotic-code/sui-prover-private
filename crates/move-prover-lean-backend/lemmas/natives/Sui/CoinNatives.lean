@@ -57,12 +57,6 @@ def split (tv0 : Type) [BEq tv0] [Inhabited tv0] (self : Coin tv0) (split_amount
 def split.aborts (tv0 : Type) [BEq tv0] [Inhabited tv0] (self : Coin tv0) (split_amount : BoundedNat (2^64)) (_ctx : Tx_context.TxContext) : Option MoveAbort :=
   if BoundedNat.sub_underflows self.balance.value split_amount then Option.some { source := MoveAbort.AbortSource.userAssert, code := 0 } else Option.none
 
-def from_balance (tv0 : Type) [BEq tv0] [Inhabited tv0] (balance : Balance.Balance tv0) (ctx : Tx_context.TxContext) : (Coin tv0 × Tx_context.TxContext) :=
-  let new_coin : Coin tv0 := { id := default, balance := balance }
-  (new_coin, ctx)
-
-def from_balance.aborts (tv0 : Type) [BEq tv0] [Inhabited tv0] (_balance : Balance.Balance tv0) (_ctx : Tx_context.TxContext) : Option MoveAbort := if false then Option.some { source := MoveAbort.AbortSource.userAssert, code := 0 } else Option.none
-
 def into_balance (tv0 : Type) [BEq tv0] [Inhabited tv0] (coin : Coin tv0) : Balance.Balance tv0 :=
   coin.balance
 

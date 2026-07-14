@@ -26,6 +26,172 @@ use crate::Program;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
+/// Called from `world_threading::thread_world` (Phase B start): rewrites `let p := WriteBack{child, …}`
+/// into `let __world := WriteBack{child, parent: __world}` when `child` holds
+/// a world-stated Mutable. `w` tracks the world-stated Mutable vars in scope:
+/// destructured results of world-stated callees, plus `Mutable.set` / alias
+/// rebinds of those.
+pub fn fix_world_stated_writebacks(
+    node: IRNode,
+    world_stated: &BTreeSet<FunctionID>,
+    w: &mut BTreeSet<TempId>,
+) -> IRNode {
+    match node {
+        IRNode::Let {
+            pattern,
+            value,
+            body,
+        } => {
+            // Track world-stated Mutable bindings.
+            match value.as_ref() {
+                IRNode::Call { function, .. }
+                    if !pattern.is_empty() && world_stated.contains(function) =>
+                {
+                    w.insert(pattern[0].clone());
+                }
+                IRNode::WriteRef { reference, .. } if pattern.len() == 1 => {
+                    if let IRNode::Var(x) = reference.as_ref() {
+                        if w.contains(x) {
+                            w.insert(pattern[0].clone());
+                        }
+                    }
+                }
+                IRNode::Var(x) if pattern.len() == 1 && w.contains(x) => {
+                    w.insert(pattern[0].clone());
+                }
+                _ => {}
+            }
+            if let IRNode::WriteBack { child, .. } = value.as_ref() {
+                if w.contains(child) {
+                    let world: TempId =
+                        std::rc::Rc::from(crate::analysis::world_threading::WORLD_VAR);
+                    let new_value = if let IRNode::WriteBack { child, edge, .. } = *value {
+                        IRNode::WriteBack {
+                            child,
+                            parent: world.clone(),
+                            edge,
+                        }
+                    } else {
+                        unreachable!()
+                    };
+                    return IRNode::Let {
+                        pattern: vec![world],
+                        value: Box::new(new_value),
+                        body: Box::new(fix_world_stated_writebacks(*body, world_stated, w)),
+                    };
+                }
+            }
+            let value = Box::new(fix_world_stated_writebacks(*value, world_stated, w));
+            IRNode::Let {
+                pattern,
+                value,
+                body: Box::new(fix_world_stated_writebacks(*body, world_stated, w)),
+            }
+        }
+        IRNode::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            let mut w2 = w.clone();
+            IRNode::If {
+                cond,
+                then_branch: Box::new(fix_world_stated_writebacks(*then_branch, world_stated, w)),
+                else_branch: Box::new(fix_world_stated_writebacks(
+                    *else_branch,
+                    world_stated,
+                    &mut w2,
+                )),
+            }
+        }
+        IRNode::Match { scrutinee, cases } => IRNode::Match {
+            scrutinee,
+            cases: cases
+                .into_iter()
+                .map(|(tag, binds, body)| {
+                    let mut w2 = w.clone();
+                    (
+                        tag,
+                        binds,
+                        fix_world_stated_writebacks(body, world_stated, &mut w2),
+                    )
+                })
+                .collect(),
+        },
+        IRNode::MatchOption {
+            scrutinee,
+            binding,
+            some_branch,
+            none_branch,
+        } => {
+            let mut w2 = w.clone();
+            IRNode::MatchOption {
+                scrutinee,
+                binding,
+                some_branch: Box::new(fix_world_stated_writebacks(*some_branch, world_stated, w)),
+                none_branch: Box::new(fix_world_stated_writebacks(
+                    *none_branch,
+                    world_stated,
+                    &mut w2,
+                )),
+            }
+        }
+        other => other,
+    }
+}
+
+/// The set of mutref-returning functions whose returned Mutable is
+/// WORLD-stated (its reconstruct writes to the World store, e.g. world-mode
+/// `table::borrow_mut`): such a Mutable is already complete and must never be
+/// composed with a structural parent. Computed as a fixpoint BEFORE bodies are
+/// transformed: base = the body contains a `MutableBorrow` whose state type is
+/// the synthetic World struct (installed by Phase A lowering); closure = calls
+/// a member. A misclassification (a function that both borrows a df slot
+/// mutably AND returns a struct-rooted mutable) fails Lean elaboration loudly
+/// at the emitted compose — never silently.
+fn compute_world_stated_mutrefs(
+    program: &Program,
+    augmented_mutref_fns: &BTreeSet<FunctionID>,
+) -> BTreeSet<FunctionID> {
+    let Some(world) = &program.world_functions else {
+        return BTreeSet::new();
+    };
+    let wsid = world.struct_id;
+    let is_mutref =
+        |fid: FunctionID| returns_mutable_ref(fid, program) || augmented_mutref_fns.contains(&fid);
+    let mut set: BTreeSet<FunctionID> = program
+        .functions
+        .iter()
+        .filter(|(fid, f)| {
+            !f.is_native
+                && is_mutref(*fid)
+                && f.body.iter().any(|n| {
+                    matches!(
+                        n,
+                        IRNode::MutableBorrow { state_type, .. }
+                            if matches!(state_type, Type::Struct { struct_id, .. } if *struct_id == wsid)
+                    )
+                })
+        })
+        .map(|(fid, _)| fid)
+        .collect();
+    loop {
+        let mut changed = false;
+        for (fid, f) in program.functions.iter() {
+            if f.is_native || set.contains(&fid) || !is_mutref(fid) {
+                continue;
+            }
+            if f.body.calls().any(|c| set.contains(&c)) {
+                set.insert(fid);
+                changed = true;
+            }
+        }
+        if !changed {
+            return set;
+        }
+    }
+}
+
 fn returns_mutable_ref(fid: FunctionID, program: &Program) -> bool {
     matches!(
         &program.functions.get(&fid).signature.return_type,
@@ -180,6 +346,8 @@ pub fn thread_mutables(program: &mut Program) {
         .map(|(&fid, _)| fid)
         .collect();
 
+    let world_stated_mutrefs = compute_world_stated_mutrefs(program, &augmented_mutref_fns);
+
     // Pre-compute composable mutref functions (needs immutable borrow of program)
     let composable_fns: BTreeSet<FunctionID> = program
         .functions
@@ -248,6 +416,7 @@ pub fn thread_mutables(program: &mut Program) {
                 &None,
                 &BTreeMap::new(),
                 &augmented_mutref_fns,
+                &world_stated_mutrefs,
             );
             program.functions.get_mut(*func_id).body = new_body;
         }
@@ -894,6 +1063,7 @@ fn find_param_aliases(body: &IRNode, info: &TransformInfo) -> BTreeMap<TempId, T
     aliases
 }
 
+#[allow(clippy::too_many_arguments)]
 fn wrap_tail(
     node: IRNode,
     info: &TransformInfo,
@@ -906,6 +1076,7 @@ fn wrap_tail(
     last_mutref_result: &Option<TempId>,
     parent_of: &BTreeMap<TempId, TempId>,
     augmented_mutref_fns: &BTreeSet<FunctionID>,
+    world_stated_mutrefs: &BTreeSet<FunctionID>,
 ) -> IRNode {
     match node {
         IRNode::Let {
@@ -952,18 +1123,46 @@ fn wrap_tail(
             };
             if pattern.len() == 1 {
                 match value.as_ref() {
-                    IRNode::MutableBorrow { val_expr, .. } => {
+                    IRNode::MutableBorrow {
+                        val_expr,
+                        reconstruct_expr,
+                        ..
+                    } => {
                         mb.insert(pattern[0].clone());
                         lb = Some(pattern[0].clone());
-                        if let Some(parent) =
+                        // World-mode borrows reconstruct into the threaded
+                        // `__world` (never a val_expr free var, which would
+                        // mis-thread the write into the key/uid parent).
+                        // Only the reserved `__world` result is honored so
+                        // slot-mode parent tracking is unchanged.
+                        let world_parent = extract_parent_var(reconstruct_expr.as_ref())
+                            .filter(|p| p.as_ref() == crate::analysis::world_threading::WORLD_VAR);
+                        if let Some(parent) = world_parent {
+                            po.insert(pattern[0].clone(), parent);
+                        } else if let Some(parent) =
                             parent_from_borrow_val(val_expr.as_ref(), &mutable_bound)
                         {
                             po.insert(pattern[0].clone(), parent);
                         }
                     }
-                    IRNode::MutableCompose { .. } => {
+                    IRNode::MutableCompose { outer, .. } => {
                         mb.insert(pattern[0].clone());
                         lb = Some(pattern[0].clone());
+                        // `insert_mutable_compose` already telescoped this var
+                        // THROUGH `outer` (e.g. `t_t6 := compose t_t6 t_t5`), so
+                        // its effective parent is now `outer`'s parent, not
+                        // `outer` itself. Advance `parent_of` past the consumed
+                        // edge so `compose_return_chain` doesn't compose it a
+                        // second time (which produced a type-incorrect
+                        // `compose __compose_1 t_t5` in `vec_map::get_mut`).
+                        match po.get(outer).cloned() {
+                            Some(grandparent) => {
+                                po.insert(pattern[0].clone(), grandparent);
+                            }
+                            None => {
+                                po.remove(&pattern[0]);
+                            }
+                        }
                     }
                     IRNode::Call { function, .. }
                         if returns_mutable_ref(*function, program)
@@ -971,7 +1170,15 @@ fn wrap_tail(
                     {
                         mb.insert(pattern[0].clone());
                         lmr = Some(pattern[0].clone());
-                        if let Some(parent) = parent_from_call_args(value.as_ref(), &mutable_bound)
+                        if world_stated_mutrefs.contains(function) {
+                            // World-stated callee Mutable: root the chain at
+                            // `__world` so no structural compose is emitted.
+                            po.insert(
+                                pattern[0].clone(),
+                                std::rc::Rc::from(super::world_threading::WORLD_VAR),
+                            );
+                        } else if let Some(parent) =
+                            parent_from_call_args(value.as_ref(), &mutable_bound)
                         {
                             po.insert(pattern[0].clone(), parent);
                         }
@@ -988,7 +1195,15 @@ fn wrap_tail(
                     {
                         mb.insert(pattern[0].clone());
                         lmr = Some(pattern[0].clone());
-                        if let Some(parent) = parent_from_call_args(value.as_ref(), &mutable_bound)
+                        if world_stated_mutrefs.contains(function) {
+                            // World-stated callee Mutable: root the chain at
+                            // `__world` so no structural compose is emitted.
+                            po.insert(
+                                pattern[0].clone(),
+                                std::rc::Rc::from(super::world_threading::WORLD_VAR),
+                            );
+                        } else if let Some(parent) =
+                            parent_from_call_args(value.as_ref(), &mutable_bound)
                         {
                             po.insert(pattern[0].clone(), parent);
                         }
@@ -1026,6 +1241,7 @@ fn wrap_tail(
                         &lmr,
                         &po,
                         augmented_mutref_fns,
+                        world_stated_mutrefs,
                     )),
                 }
             } else {
@@ -1050,6 +1266,7 @@ fn wrap_tail(
                 last_mutref_result,
                 parent_of,
                 augmented_mutref_fns,
+                world_stated_mutrefs,
             )),
             else_branch: Box::new(wrap_tail(
                 *else_branch,
@@ -1063,6 +1280,7 @@ fn wrap_tail(
                 last_mutref_result,
                 parent_of,
                 augmented_mutref_fns,
+                world_stated_mutrefs,
             )),
         },
         other => {
@@ -1181,12 +1399,25 @@ fn compose_return_chain(
         IRNode::Var(name) if mutable_bound.contains(name) => name.clone(),
         _ => return (Vec::new(), return_expr),
     };
-    // Walk parent_of from `var` to collect the chain of borrow vars.
+    // Walk parent_of from `var` to collect the chain of borrow vars. A
+    // world-backed borrow's parent binder is the reserved `__world` (its
+    // reconstruct writes to the World store directly), so the Mutable is
+    // already complete there — stop the chain BEFORE `__world` and never
+    // compose past it.
     let mut chain: Vec<TempId> = vec![var.clone()];
     let mut current = var.clone();
+    let mut world_rooted = false;
     while let Some(parent) = parent_of.get(&current).cloned() {
+        if parent.as_ref() == super::world_threading::WORLD_VAR {
+            world_rooted = true;
+            break;
+        }
         chain.push(parent.clone());
         current = parent;
+    }
+    if chain.len() < 2 && world_rooted {
+        // Single world-backed level: the Mutable's state IS the World.
+        return (Vec::new(), return_expr);
     }
     if chain.len() < 2 {
         // No multi-level chain. Fall back to the legacy single-level compose.
@@ -1262,8 +1493,16 @@ fn fix_call_sites(
     let mut expanded = mutable_names.clone();
     find_copies(&node, &mut expanded);
     let copy_sources = build_copy_sources(&node, mutable_names);
+    let result_aliases = build_result_aliases(&node, transform_map);
     let counter = std::cell::Cell::new(0usize);
-    fix_call_sites_rec(node, transform_map, &expanded, &copy_sources, &counter)
+    fix_call_sites_rec(
+        node,
+        transform_map,
+        &expanded,
+        &copy_sources,
+        &result_aliases,
+        &counter,
+    )
 }
 
 /// Extract the variable name from an argument at a mutable param position.
@@ -1296,6 +1535,7 @@ fn get_rebind_targets(
     transform_map: &BTreeMap<FunctionID, TransformInfo>,
     expanded: &BTreeSet<TempId>,
     copy_sources: &BTreeMap<TempId, TempId>,
+    result_aliases: &BTreeMap<TempId, TempId>,
 ) -> Vec<TempId> {
     let args = match call_node {
         IRNode::Let { ref value, .. } => {
@@ -1321,10 +1561,74 @@ fn get_rebind_targets(
         .filter_map(|mp| {
             args.get(mp.param_index).and_then(|arg| {
                 let var = extract_arg_var(arg)?;
+                // A receiver pass-through call (e.g. `set_sender(&mut self, ..): &mut Self`)
+                // binds its plain result to a temp that is NOT itself a mutable-param
+                // WriteBack target, but it aliases the same live value as the param arg
+                // it was called on. Resolve through that alias BEFORE `trace_to_root`
+                // (which only chases `$`-prefixed compiler temps) so a later call using
+                // this result as its receiver rebinds the ORIGINAL local instead of the
+                // disconnected result temp.
+                let var = result_aliases.get(&var).cloned().unwrap_or(var);
                 Some(trace_to_root(&var, copy_sources))
             })
         })
         .collect()
+}
+
+/// For each `Let([result, mut_rets...], Call(f, args))` where `f` has exactly one
+/// mutable param and its own (pre-augmentation) return type is a `MutableReference`
+/// of that same param's inner type — the receiver pass-through idiom
+/// (`fun f(self: &mut T, ..): &mut T { ..; self }`) — record that `result` aliases
+/// whatever variable was passed for the mutable param. Iterates to a fixpoint so
+/// chained receiver calls (`a.f().g()`) resolve back to the original root.
+fn build_result_aliases(
+    node: &IRNode,
+    transform_map: &BTreeMap<FunctionID, TransformInfo>,
+) -> BTreeMap<TempId, TempId> {
+    let mut aliases: BTreeMap<TempId, TempId> = BTreeMap::new();
+    loop {
+        let mut changed = false;
+        for n in node.iter() {
+            if let IRNode::Let { pattern, value, .. } = n {
+                // Runs on the PRE-transformation body: the call still binds its
+                // single &mut result (`let $tN := f($tM, ..)`) — the augmented
+                // `__mut_ret` destructure is created later by this very pass.
+                if pattern.is_empty() || aliases.contains_key(&pattern[0]) {
+                    continue;
+                }
+                let (function, args) = match value.as_ref() {
+                    IRNode::Call { function, args, .. } => (function, args),
+                    _ => continue,
+                };
+                let ti = match transform_map.get(function) {
+                    Some(ti) => ti,
+                    None => continue,
+                };
+                if ti.mutable_params.len() != 1 {
+                    continue;
+                }
+                let mp = &ti.mutable_params[0];
+                let is_receiver_passthrough = matches!(
+                    &ti.original_return_type,
+                    Type::MutableReference(inner, _) if inner.as_ref() == &mp.inner_type
+                );
+                if !is_receiver_passthrough {
+                    continue;
+                }
+                let arg_var = match args.get(mp.param_index).and_then(extract_arg_var) {
+                    Some(v) => v,
+                    None => continue,
+                };
+                let resolved = aliases.get(&arg_var).cloned().unwrap_or(arg_var);
+                aliases.insert(pattern[0].clone(), resolved);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    aliases
 }
 
 fn fix_call_sites_rec(
@@ -1332,6 +1636,7 @@ fn fix_call_sites_rec(
     transform_map: &BTreeMap<FunctionID, TransformInfo>,
     expanded: &BTreeSet<TempId>,
     copy_sources: &BTreeMap<TempId, TempId>,
+    result_aliases: &BTreeMap<TempId, TempId>,
     counter: &std::cell::Cell<usize>,
 ) -> IRNode {
     match node {
@@ -1352,12 +1657,24 @@ fn fix_call_sites_rec(
                     value: value.clone(),
                     body: Box::new(IRNode::Tuple(vec![])),
                 };
-                let targets =
-                    get_rebind_targets(&dummy, func_id, transform_map, expanded, copy_sources);
+                let targets = get_rebind_targets(
+                    &dummy,
+                    func_id,
+                    transform_map,
+                    expanded,
+                    copy_sources,
+                    result_aliases,
+                );
 
                 if targets.is_empty() {
-                    let rec_body =
-                        fix_call_sites_rec(*body, transform_map, expanded, copy_sources, counter);
+                    let rec_body = fix_call_sites_rec(
+                        *body,
+                        transform_map,
+                        expanded,
+                        copy_sources,
+                        result_aliases,
+                        counter,
+                    );
                     return IRNode::Let {
                         pattern,
                         value,
@@ -1365,8 +1682,14 @@ fn fix_call_sites_rec(
                     };
                 }
 
-                let rec_body =
-                    fix_call_sites_rec(*body, transform_map, expanded, copy_sources, counter);
+                let rec_body = fix_call_sites_rec(
+                    *body,
+                    transform_map,
+                    expanded,
+                    copy_sources,
+                    result_aliases,
+                    counter,
+                );
                 let id = counter.get();
                 counter.set(id + 1);
                 let suffix = if id == 0 {
@@ -1444,6 +1767,7 @@ fn fix_call_sites_rec(
                     transform_map,
                     expanded,
                     copy_sources,
+                    result_aliases,
                     counter,
                 )),
                 body: Box::new(fix_call_sites_rec(
@@ -1451,6 +1775,7 @@ fn fix_call_sites_rec(
                     transform_map,
                     expanded,
                     copy_sources,
+                    result_aliases,
                     counter,
                 )),
             }
@@ -1466,6 +1791,7 @@ fn fix_call_sites_rec(
                 transform_map,
                 expanded,
                 copy_sources,
+                result_aliases,
                 counter,
             )),
             else_branch: Box::new(fix_call_sites_rec(
@@ -1473,6 +1799,7 @@ fn fix_call_sites_rec(
                 transform_map,
                 expanded,
                 copy_sources,
+                result_aliases,
                 counter,
             )),
         },
@@ -1483,8 +1810,14 @@ fn fix_call_sites_rec(
                 unreachable!()
             };
             if let Some(is_void) = get_call_void_info(function, transform_map) {
-                let targets =
-                    get_rebind_targets(&bare_call, function, transform_map, expanded, copy_sources);
+                let targets = get_rebind_targets(
+                    &bare_call,
+                    function,
+                    transform_map,
+                    expanded,
+                    copy_sources,
+                    result_aliases,
+                );
 
                 if targets.is_empty() {
                     return bare_call;
@@ -1562,7 +1895,14 @@ fn fix_call_sites_rec(
                     (
                         idx,
                         vars,
-                        fix_call_sites_rec(body, transform_map, expanded, copy_sources, counter),
+                        fix_call_sites_rec(
+                            body,
+                            transform_map,
+                            expanded,
+                            copy_sources,
+                            result_aliases,
+                            counter,
+                        ),
                     )
                 })
                 .collect(),
@@ -1579,6 +1919,7 @@ fn fix_call_sites_rec(
                 transform_map,
                 expanded,
                 copy_sources,
+                result_aliases,
                 counter,
             )),
             binding,
@@ -1587,6 +1928,7 @@ fn fix_call_sites_rec(
                 transform_map,
                 expanded,
                 copy_sources,
+                result_aliases,
                 counter,
             )),
         },
@@ -1792,10 +2134,21 @@ fn strip_writerefs_for_demoted(
                 if let Some(name) = target {
                     if demoted.contains(&name) {
                         if let Some(info) = borrow_info.get(&name) {
+                            // Rebind the demoted borrow's value variable to the
+                            // written value and reconstruct FROM that variable
+                            // (not the raw wval expression). The borrow's
+                            // end-of-scope WriteBack (strip_writebacks_for_demoted)
+                            // reconstructs with `Var(child)` — without this
+                            // rebinding it would re-emit the borrow-time READ
+                            // value, clobbering this write back to the stale
+                            // value (the read-then-write `let prev = *m; *m = v`
+                            // pattern). With it, the trailing writeback re-emits
+                            // the same written value — idempotent — while nested
+                            // borrows that rebind `name` still flow through.
                             let mut reconstructed = substitute_var(
                                 info.reconstruct_expr.clone(),
                                 &info.reconstruct_param,
-                                &*wval,
+                                &IRNode::Var(name.clone()),
                             );
                             // Prefer the structural parent (base of the outer
                             // UpdateField) over a free-vars heuristic. Multi-DF
@@ -1840,8 +2193,9 @@ fn strip_writerefs_for_demoted(
                             }
                             let mut new_scope = in_scope.clone();
                             new_scope.insert(canonical.clone());
-                            if keep.contains(&canonical) {
-                                return IRNode::Let {
+                            new_scope.insert(name.clone());
+                            let inner = if keep.contains(&canonical) {
+                                IRNode::Let {
                                     pattern: vec![canonical.clone()],
                                     value: Box::new(IRNode::WriteRef {
                                         reference: Box::new(IRNode::Var(canonical)),
@@ -1856,21 +2210,26 @@ fn strip_writerefs_for_demoted(
                                         to_last_copy,
                                         &new_scope,
                                     )),
-                                };
-                            }
-                            let value = Box::new(reconstructed);
+                                }
+                            } else {
+                                IRNode::Let {
+                                    pattern: vec![canonical],
+                                    value: Box::new(reconstructed),
+                                    body: Box::new(strip_writerefs_for_demoted(
+                                        *body,
+                                        demoted,
+                                        keep,
+                                        borrow_info,
+                                        to_source,
+                                        to_last_copy,
+                                        &new_scope,
+                                    )),
+                                }
+                            };
                             return IRNode::Let {
-                                pattern: vec![canonical],
-                                value,
-                                body: Box::new(strip_writerefs_for_demoted(
-                                    *body,
-                                    demoted,
-                                    keep,
-                                    borrow_info,
-                                    to_source,
-                                    to_last_copy,
-                                    &new_scope,
-                                )),
+                                pattern: vec![name],
+                                value: wval,
+                                body: Box::new(inner),
                             };
                         }
                         let mut new_scope = in_scope.clone();
@@ -1975,7 +2334,19 @@ fn resolve_canonical_in_scope(
 ) -> TempId {
     // First try the standard resolution
     let canonical = if let Some(root) = to_source.get(parent_var) {
+        // `parent_var` is itself a copy (`parent_var := root`) — resolve to its
+        // source.
         root.clone()
+    } else if in_scope.contains(parent_var) {
+        // `parent_var` is a live, non-copy variable (e.g. a `&mut self` param
+        // continuously rebound via `let self := …`). It IS the reconstruction
+        // target. Do NOT redirect to `to_last_copy`: a forward copy like
+        // `let $t41 := self` (a read-only snapshot passed to a helper) is a
+        // DIVERGENT alias, not `self`'s new name, and using it as the base
+        // writes the field update into a stale, dead temp (sui-system
+        // `validator_set::advance_epoch`: `self.total_stake = new_total_stake`
+        // landed on the `compute_slashed_validators` snapshot).
+        parent_var.clone()
     } else {
         to_last_copy
             .get(parent_var)
@@ -2029,6 +2400,19 @@ fn extract_parent_var(reconstruct_expr: &IRNode) -> Option<TempId> {
                 None
             }
         }
+        // World-mode borrow_mut (`analysis/world_threading.rs` Phase A):
+        // reconstruct_expr is `World.setDf K V __world uid k __v`, whose
+        // reconstructed parent is the threaded `__world` variable (always
+        // the first argument). Keyed on the reserved `__world` name, which
+        // slot-mode programs never bind — inert outside world-mode.
+        IRNode::Call { args, .. } => match args.first() {
+            Some(IRNode::Var(name))
+                if name.as_ref() == crate::analysis::world_threading::WORLD_VAR =>
+            {
+                Some(name.clone())
+            }
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -2194,9 +2578,23 @@ fn insert_mutable_compose_rec(
                             IRNode::WriteRef { .. } => None,
                             _ => current_borrow.clone(),
                         }
+                    } else if ab.parent_vars.contains(&pattern[0]) {
+                        // The borrow's parent value is being rebound (e.g.
+                        // `let runner := Mutable.apply t_t10`) — the borrow is
+                        // now consumed/stale. A later composable mutref call on
+                        // the fresh parent must NOT compose against this dead
+                        // borrow (that produced a type-incompatible
+                        // `Mutable.compose`). Invalidate it.
+                        None
                     } else {
                         current_borrow.clone()
                     }
+                } else {
+                    current_borrow.clone()
+                }
+            } else if let Some(ref ab) = current_borrow {
+                if pattern.iter().any(|p| ab.parent_vars.contains(p)) {
+                    None
                 } else {
                     current_borrow.clone()
                 }
@@ -2212,8 +2610,29 @@ fn insert_mutable_compose_rec(
                                 .iter()
                                 .flat_map(|arg: &IRNode| arg.free_vars())
                                 .collect();
-                            let matches =
+                            // The composable telescope `Mutable V Parent ∘
+                            // Mutable Parent Caller` is only well-typed when the
+                            // mutref fn genuinely re-borrows THROUGH the active
+                            // borrow. Two conditions, BOTH required:
+                            //  (a) the call references `ab.borrow_var` — it is
+                            //      applied to the borrow (`Mutable.val t_t5`),
+                            //      not merely sharing a parent var (excludes
+                            //      `scenario_mut runner` after an unrelated field
+                            //      borrow of `runner`).
+                            //  (b) the call references one of the borrow's parent
+                            //      vars — the index/key is derived from the parent
+                            //      struct (`get_idx … self …`), the signature of a
+                            //      value that flows OUT via the return chain. When
+                            //      absent (`borrow_mut (Mutable.val t_t5) validator`
+                            //      keyed by a plain param), the callee instead
+                            //      writes back manually through `t_t5`
+                            //      (`Mutable.set t_t5 (Mutable.apply t_t6)`); a
+                            //      compose there re-anchors `t_t6` to the caller
+                            //      struct and breaks that manual `apply`.
+                            let uses_borrow = call_arg_vars.contains(&ab.borrow_var);
+                            let uses_parent =
                                 ab.parent_vars.iter().any(|pv| call_arg_vars.contains(pv));
+                            let matches = uses_borrow && uses_parent;
                             if matches {
                                 let result_var = pattern[0].clone();
                                 let body = insert_mutable_compose_rec(*body, composable_fns, &None);
@@ -2329,6 +2748,15 @@ fn strip_writebacks_for_demoted(
                             &info.reconstruct_param,
                             &IRNode::Var(child.clone()),
                         );
+                        // World-mode borrows reconstruct into the threaded
+                        // `__world`, not the WriteBack's structural parent
+                        // (which is the borrow-chain root, e.g. the object
+                        // whose UID keyed the df op). Only the reserved
+                        // `__world` reconstruction parent overrides — the
+                        // slot-mode binder is unchanged.
+                        let bind_var = extract_parent_var(&info.reconstruct_expr)
+                            .filter(|p| p.as_ref() == crate::analysis::world_threading::WORLD_VAR)
+                            .unwrap_or_else(|| parent.clone());
                         // When the parent is Mutable (in keep), wrap in WriteRef
                         // to preserve the Mutable wrapper.
                         let value = if keep.contains(parent) {
@@ -2340,9 +2768,9 @@ fn strip_writebacks_for_demoted(
                             Box::new(reconstructed)
                         };
                         let mut new_scope = in_scope.clone();
-                        new_scope.insert(parent.clone());
+                        new_scope.insert(bind_var.clone());
                         return IRNode::Let {
-                            pattern: vec![parent.clone()],
+                            pattern: vec![bind_var],
                             value,
                             body: Box::new(strip_writebacks_for_demoted(
                                 *body,

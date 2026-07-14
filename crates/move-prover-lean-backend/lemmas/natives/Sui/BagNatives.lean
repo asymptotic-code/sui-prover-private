@@ -40,23 +40,9 @@ import Sui.ObjectNatives
 
 namespace Bag
 
-/-- One heterogeneous key/value pair. -/
-structure Entry (U : Type) [Universe U] where
-  kc : U
-  k  : Universe.interp kc
-  vc : U
-  v  : Universe.interp vc
-
-instance {U : Type} [Universe U] : BEq (Entry U) where
-  beq e1 e2 :=
-    match Universe.decEq e1.kc e2.kc with
-    | isTrue h =>
-      if (h ▸ e1.k == e2.k) then
-        match Universe.decEq e1.vc e2.vc with
-        | isTrue h' => (h' ▸ e1.v == e2.v)
-        | isFalse _ => false
-      else false
-    | isFalse _ => false
+-- `Entry U` (the heterogeneous key/value pair) lives in
+-- `Prelude/Universe.lean`, with a `DecidableEq` instance (so `BEq` and
+-- `LawfulBEq` synthesize — the hand-written `BEq (Entry U)` is retired).
 
 /-- `Bag (U : Type) [Universe U]` -- typed storage IN the struct. The
 constructor is named `ofParts`; `Bag.mk` below is a 2-argument smart
@@ -162,7 +148,23 @@ def borrow.aborts {U : Type} [Universe U] (K V : Type)
     [HasCode U K] [HasCode U V] [BEq K] [Inhabited V]
     (_self : Bag U) (_k : K) : Bool := false
 
+/-- `bag::borrow_mut` — read-modify-write access to a bag value. The Mutable's
+reconstruct writes the new value back via `set` (same key, same bag), so the
+caller's `Mutable.apply` writeback lands in `Bag.storage`. Without this def the
+Move-source lowering fell through to the `borrow_child_object_mut` default stub
+and every bag read-modify-write was silently dropped (staking_pool
+FungibleStakedSuiData supply/principal updates). -/
+def borrow_mut {U : Type} [Universe U] (K V : Type)
+    [HasCode U K] [HasCode U V] [BEq K] [Inhabited V]
+    (self : Bag U) (k : K) : (Mutable V (Bag U)) × Bag U :=
+  (Mutable.mk (borrow K V self k) (fun v => set K V self k v), self)
+
+def borrow_mut.aborts {U : Type} [Universe U] (K V : Type)
+    [HasCode U K] [HasCode U V] [BEq K] [Inhabited V]
+    (_self : Bag U) (_k : K) : Bool := false
+
 def contains {U : Type} [Universe U] (K : Type)
+
     [HasCode U K] [BEq K]
     (self : Bag U) (k : K) : Bool :=
   self.storage.any (fun e => Entry.keyMatches e k)

@@ -4,7 +4,7 @@
 //! Rendering context - shared state during IR rendering
 
 use super::lean_writer::LeanWriter;
-use intermediate_theorem_format::{ModuleID, Program, TempId};
+use intermediate_theorem_format::{FunctionID, ModuleID, Program, TempId};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt::Write;
@@ -30,6 +30,11 @@ pub struct RenderCtx<'a, W: Write> {
     pub var_overrides: HashMap<TempId, String>,
     /// The escaped name of the function currently being rendered.
     pub current_function_name: String,
+    /// The `FunctionID` of the function currently being rendered. ID-keyed (not
+    /// name-keyed) so the callee-`requires` PRECOND render path can distinguish a
+    /// threaded caller from a same-named cross-module twin (the `render.rs:360`
+    /// collision the precond set was made ID-keyed to avoid).
+    pub current_function_id: Option<FunctionID>,
     /// Escaped parameter names of the function currently being rendered.
     /// The loop-invariant entry cascade passes them to the user `loop_entry`
     /// lemma when discharging the entry call.
@@ -44,6 +49,12 @@ pub struct RenderCtx<'a, W: Write> {
     /// as field access on a mutual-group function (e.g., `while_0.after` parsed as
     /// `(while_0).after` when `while_0` is in the mutual block).
     pub mutual_group_func_names: Vec<String>,
+    /// Temps holding a `Mutable` borrowed from `dynamic_object_field::borrow_mut`
+    /// (native, UID-anchored). A `WriteBackEdge::Field` whose child is in this set
+    /// must keep the `{ parent with id := Mutable.apply child }` form and NOT be
+    /// collapsed to `Mutable.apply child`. Populated per function before its body
+    /// is rendered.
+    pub object_field_borrow_children: HashSet<TempId>,
 }
 
 impl<'a, W: Write> RenderCtx<'a, W> {
@@ -65,10 +76,12 @@ impl<'a, W: Write> RenderCtx<'a, W> {
             mutual_group_info: None,
             var_overrides: HashMap::new(),
             current_function_name: String::new(),
+            current_function_id: None,
             current_function_params: Vec::new(),
             entry_hyp: None,
             entry_hyp_counter: 0,
             mutual_group_func_names: Vec::new(),
+            object_field_borrow_children: HashSet::new(),
         }
     }
 

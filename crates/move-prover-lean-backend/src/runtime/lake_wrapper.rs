@@ -32,17 +32,22 @@ pub async fn run_lake_build_targets(project_dir: &str, targets: &[String]) -> Re
     for t in targets {
         cmd.arg(t);
     }
-    // 20 min: large packages (cetus_clmm `Pool_tests.lean` ~3.5 MB) routinely
-    // need several minutes per file. Anything shorter than ~10 min causes
-    // mid-build aborts on the bigger packages, after which test drivers fail
-    // to link with VM_INVARIANT_VIOLATION.
-    const LAKE_TIMEOUT_SECS: u64 = 1200;
+    // 20 min default: large packages (cetus_clmm `Pool_tests.lean` ~3.5 MB)
+    // routinely need several minutes per file. Anything shorter than ~10 min
+    // causes mid-build aborts on the bigger packages, after which test drivers
+    // fail to link with VM_INVARIANT_VIOLATION. Override with
+    // `FOXY_LAKE_TIMEOUT_SECS` for heavy packages whose cumulative build (e.g.
+    // sui-system's reward-math test modules) exceeds the default.
+    let lake_timeout_secs: u64 = std::env::var("FOXY_LAKE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1200);
     let output = tokio::time::timeout(
-        std::time::Duration::from_secs(LAKE_TIMEOUT_SECS),
+        std::time::Duration::from_secs(lake_timeout_secs),
         cmd.current_dir(project_dir).output(),
     )
     .await
-    .map_err(|_| anyhow!("lake build timed out after {} seconds", LAKE_TIMEOUT_SECS))?
+    .map_err(|_| anyhow!("lake build timed out after {} seconds", lake_timeout_secs))?
     .map_err(|e| anyhow!("failed to execute lake: {}", e))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();

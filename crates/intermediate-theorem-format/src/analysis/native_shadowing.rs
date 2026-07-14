@@ -134,11 +134,30 @@ fn collect_native_function_names(natives_dir: &Path) -> HashSet<(String, String)
 /// Map a Move module name like "coin" to the native file stem "Coin".
 /// Matches `escape::module_name_to_namespace` for the simple case (which
 /// is all the natives directory uses).
+/// Lean-builtin / reserved Move module names that the renderer prefixes with
+/// "Move" when forming a namespace (mirror of `escape::module_name_to_namespace`,
+/// duplicated here because the IR crate cannot depend on the backend). The
+/// native-overlay file stem (`<Namespace>Natives.lean`) uses that same
+/// namespace, so this must match — otherwise builtin-module natives (notably
+/// `vector::destroy_empty`, whose overlay `.aborts` is CONDITIONAL) never match
+/// and their `.aborts` stays an unsound `Option.none`.
+const LEAN_PREFIXED_MODULES: &[&str] = &[
+    "vector", "option", "string", "list", "array", "nat", "int", "bool", "io", "system", "float",
+    "sort", "type", "prop",
+];
+
 fn module_name_to_native_stem(name: &str) -> String {
-    let mut chars = name.chars();
-    match chars.next() {
-        Some(c) => c.to_uppercase().chain(chars).collect(),
-        None => String::new(),
+    let capitalized: String = {
+        let mut chars = name.chars();
+        match chars.next() {
+            Some(c) => c.to_uppercase().chain(chars).collect(),
+            None => String::new(),
+        }
+    };
+    if LEAN_PREFIXED_MODULES.contains(&name) {
+        format!("Move{}", capitalized)
+    } else {
+        capitalized
     }
 }
 
@@ -170,7 +189,17 @@ pub fn mark_native_shadowed(program: &mut Program, natives_dir: &Path) {
     let func_ids: Vec<usize> = program.functions.iter().map(|(id, _)| id).collect();
     for fid in &func_ids {
         let func = program.functions.get(fid);
-        if func.is_native {
+        // Do NOT skip functions that are already `is_native` (genuine Move
+        // `native fun`s like `vector::destroy_empty`). Their `.aborts`
+        // companion is still generated generically as `Option.none` with
+        // `is_native = false`, so it must be normalized here too — otherwise
+        // `decompose_aborts` treats the `.aborts` leaf as trivially-`none` and
+        // closes it with `rfl`, which fails against a CONDITIONAL native
+        // overlay (`destroy_empty.aborts v = if ¬v.isEmpty then some ..`),
+        // producing an unprovable recomposition theorem
+        // (sui-system Rewards_distribution_tests). The `.aborts` normalization
+        // below is idempotent, so re-marking an already-native value fn is safe.
+        if func.name.contains(".aborts") {
             continue;
         }
         let module_name = &program.modules.get(func.module_id).name;
@@ -188,11 +217,22 @@ pub fn mark_native_shadowed(program: &mut Program, natives_dir: &Path) {
         .collect();
 
     for (module_id, fid) in shadowed {
-        let aborts_name = {
+        let (aborts_name, stem) = {
             let func = program.functions.get(&fid);
-            format!("{}.aborts", func.name)
+            let stem = module_name_to_native_stem(&program.modules.get(func.module_id).name);
+            (format!("{}.aborts", func.name), stem)
         };
         program.functions.get_mut(fid).is_native = true;
+        // Only normalize the `.aborts` companion when the overlay actually
+        // DEFINES a `<name>.aborts` (so the renderer's `<Namespace>.<name>.aborts`
+        // reference resolves). Some natives ship an overlay value def but no
+        // `.aborts` (e.g. `Bcs.to_bytes`); marking those would emit a call to a
+        // nonexistent `BcsNatives.to_bytes.aborts`. Natives WITH a conditional
+        // overlay `.aborts` (e.g. `vector::destroy_empty`) need the mark so
+        // `decompose_aborts` routes the leaf to an obligation instead of `rfl`.
+        if !native_names.contains(&(stem, aborts_name.clone())) {
+            continue;
+        }
         if let Some(&aborts_id) = by_module_name.get(&(module_id, aborts_name)) {
             let aborts = program.functions.get_mut(aborts_id);
             aborts.is_native = true;

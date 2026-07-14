@@ -510,8 +510,8 @@ fn fix_nested_if_types(node: IRNode, reg: &mut VariableRegistry) -> IRNode {
 fn make_return_unit(node: &IRNode) -> IRNode {
     match node {
         IRNode::Tuple(v) if v.is_empty() => node.clone(),
-        IRNode::WriteRef { .. } | IRNode::Call { .. } => {
-            // These return unit, wrap them to make it explicit
+        IRNode::Call { .. } => {
+            // Unit-returning call (guaranteed by ends_with_unit); wrap to make it explicit
             IRNode::Let {
                 pattern: vec![],
                 value: Box::new(node.clone()),
@@ -551,7 +551,12 @@ fn ends_with_unit_inner(node: &IRNode, reg: &VariableRegistry, depth: usize) -> 
     }
     match node {
         IRNode::Tuple(v) if v.is_empty() => true,
-        IRNode::WriteRef { .. } => true,
+        // NOT WriteRef: this pass runs only post-threading (from `optimize_with`,
+        // called by `optimize_all`), where WriteRef renders as the value-returning
+        // `Mutable.set`/`Mutable.reconstruct`. A WriteRef in tail position exists
+        // precisely because its value is consumed (e.g. a lifted phi that temp
+        // inlining collapsed from `let x := WriteRef; x`); treating it as unit
+        // discards the branch's mutation and hoists the other branch out of the If.
         IRNode::Call { function, .. } => {
             if let Some(f) = reg.program().functions.try_get(function) {
                 matches!(&f.signature.return_type, Type::Tuple(v) if v.is_empty())
@@ -1254,6 +1259,17 @@ fn apply_coalesce_peephole(
                 // a buggy revert. The new shadow update is recorded
                 // in step 3 via `latest_shadow.insert`, which will
                 // overwrite any stale entry on the same key.
+                //
+                // But X ITSELF no longer equals the field it snapshotted
+                // (one of its own fields just changed), so a later
+                // `{ owner with f := X }` is a REAL writeback, not a
+                // revert. Drop X's own snapshot entry or the self-noop
+                // peephole coalesces that writeback into the PREVIOUS
+                // shadow on the same key, silently discarding this update
+                // (two consecutive `&mut self.metadata` borrows: the
+                // second writeback reused the first borrow's temp,
+                // validator update_next_epoch_protocol_pubkey).
+                snapshots.remove(v);
             } else {
                 invalidate_for_rebind(&mut snapshots, &mut aliases, &mut latest_shadow, v);
             }
@@ -2045,6 +2061,38 @@ fn propagate_chain(
                     // always carries the post-WriteBack plain value
                     // matching the field's declared type.
                     out.push((pattern.clone(), value.clone()));
+                    // Ordering: a call that mutates BOTH the snapshot temp
+                    // and its origin (e.g. an extracted while-loop helper
+                    // taking the borrowed field vector AND `self`) emits a
+                    // contiguous augmented-WriteBack chain:
+                    //
+                    //     WriteBack { child: __mut_ret_0, parent: $t6 }
+                    //     WriteBack { child: __mut_ret_1, parent: self }
+                    //
+                    // Emitting the propagated field update between the two
+                    // would let the second WriteBack rebind `origin` to the
+                    // call's (pre-reconstruct) value and CLOBBER the update
+                    // (sui-system `validator_set::effectuate_staged_metadata`:
+                    // staged metadata never landed back in
+                    // `self.active_validators`). Drain any immediately
+                    // following plain-origin WriteBacks first so the field
+                    // update applies to the post-call origin.
+                    while let Some((next_pat, next_val)) = iter.peek() {
+                        let is_origin_writeback = next_pat.is_empty()
+                            && matches!(
+                                next_val,
+                                IRNode::WriteBack {
+                                    parent: p,
+                                    edge: WriteBackEdge::Direct,
+                                    ..
+                                } if p == &origin
+                            );
+                        if !is_origin_writeback {
+                            break;
+                        }
+                        let (next_pat, next_val) = iter.next().unwrap();
+                        out.push((next_pat, next_val));
+                    }
                     // Idempotency: skip the propagation if the same
                     // field update is already present in the chain —
                     // either just before this WriteBack (some upstream
@@ -2230,7 +2278,26 @@ fn wrap_walk(node: IRNode, reg: &mut VariableRegistry) -> IRNode {
                     &value,
                     IRNode::If { .. } | IRNode::Match { .. } | IRNode::MatchOption { .. }
                 );
-                if x_is_mutable && value_is_branching {
+                // Also catch a straight-line rebind `let X := { (Mutable.val X)
+                // with field := .. }` — an `UpdateField` on the Let spine whose
+                // base is X itself (a nested-field write-back that
+                // `wrap_branch_terminals`, which only walks If/Match branches,
+                // misses). Without wrapping it in `WriteRef`, X is rebound to a
+                // plain struct value while surrounding code still treats it as
+                // `Mutable`, giving `expected structure` / Mutable type
+                // mismatches. `wrap_branch_terminals` hits its terminal arm on a
+                // bare `UpdateField` and wraps it, so the same call handles both.
+                let value_updates_x = match &value {
+                    IRNode::UpdateField { base, .. } => match base.as_ref() {
+                        IRNode::Var(b) => b == x,
+                        IRNode::ReadRef(inner) => {
+                            matches!(inner.as_ref(), IRNode::Var(b) if b == x)
+                        }
+                        _ => false,
+                    },
+                    _ => false,
+                };
+                if x_is_mutable && (value_is_branching || value_updates_x) {
                     wrap_branch_terminals(value, x)
                 } else {
                     value
@@ -2376,4 +2443,118 @@ fn wrap_branch_terminals(node: IRNode, x: &TempId) -> IRNode {
             terminal
         }
     }
+}
+
+/// Fix the discarded-reconstruct anti-pattern produced by `wrap_tail` when a
+/// function's receiver is mutated through a mutref-returning helper's result:
+///
+/// ```text
+/// Let { pattern: [P],
+///       value: Let { pattern: [], value: WriteBack { parent: P, .. }, body: Var(P) },
+///       body: B }
+/// ```
+///
+/// The inner empty-pattern `Let` runs the `WriteBack` for effect and then
+/// yields `Var(P)` — the ORIGINAL, un-reconstructed `P`. Bound to `let P := …`
+/// this renders as `let _ := Mutable.apply child; let P := P`, silently dropping
+/// the reconstruction (sui-system `validator_set::request_add_stake`: the staked
+/// validator never lands back in `self.active_validators`). A `WriteBack` always
+/// renders to the reconstructed parent value, so the fix is to bind it directly:
+///
+/// ```text
+/// Let { pattern: [P], value: WriteBack { parent: P, .. }, body: B }
+/// ```
+pub fn fix_discarded_reconstruct_writebacks(node: IRNode) -> IRNode {
+    node.map(&mut |n| {
+        if let IRNode::Let {
+            pattern,
+            value,
+            body,
+        } = n
+        {
+            if pattern.len() == 1 {
+                if let IRNode::Let {
+                    pattern: inner_pat,
+                    value: inner_val,
+                    body: inner_body,
+                } = *value
+                {
+                    // The child whose `Mutable.apply` reconstructs the parent.
+                    let child = if let IRNode::WriteBack { child, parent, .. } = inner_val.as_ref()
+                    {
+                        if *parent == pattern[0] {
+                            Some(child.clone())
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    let inner_returns_parent =
+                        matches!(inner_body.as_ref(), IRNode::Var(v) if *v == pattern[0]);
+                    // Only bind the reconstruction directly to the parent when
+                    // the child is NOT reused later in the body. If it is, the
+                    // `Mutable.apply` here reconstructs an INTERMEDIATE level of
+                    // a multi-level borrow (the parent is updated elsewhere via
+                    // a field-update), so binding it to the parent would mistype
+                    // it (sui-system `validator_set::request_withdraw_stake`
+                    // inactive-validator branch). Leaving the wrapped
+                    // discard-and-return-parent form is correct there.
+                    let child_reused = child
+                        .as_ref()
+                        .map(|c| temp_referenced(&body, c))
+                        .unwrap_or(true);
+                    if inner_pat.is_empty() && inner_returns_parent && !child_reused {
+                        return IRNode::Let {
+                            pattern,
+                            value: inner_val,
+                            body,
+                        };
+                    }
+                    return IRNode::Let {
+                        pattern,
+                        value: Box::new(IRNode::Let {
+                            pattern: inner_pat,
+                            value: inner_val,
+                            body: inner_body,
+                        }),
+                        body,
+                    };
+                }
+                return IRNode::Let {
+                    pattern,
+                    value,
+                    body,
+                };
+            }
+            return IRNode::Let {
+                pattern,
+                value,
+                body,
+            };
+        }
+        n
+    })
+}
+
+/// Whether `target` is referenced anywhere in `node`, including the `child` /
+/// `parent` slots of `WriteBack` and the `inner` / `outer` slots of
+/// `MutableCompose` (which `all_var_refs` misses because they are bare
+/// `TempId`s, not `Var` nodes).
+fn temp_referenced(node: &IRNode, target: &TempId) -> bool {
+    match node {
+        IRNode::Var(v) => return v == target,
+        IRNode::WriteBack { child, parent, .. } => {
+            if child == target || parent == target {
+                return true;
+            }
+        }
+        IRNode::MutableCompose { inner, outer } => {
+            if inner == target || outer == target {
+                return true;
+            }
+        }
+        _ => {}
+    }
+    node.iter_children().any(|c| temp_referenced(c, target))
 }

@@ -214,8 +214,16 @@ fn inline_in_node(ir: IRNode, outer_temps: &BTreeMap<TempId, IRNode>, aborts: bo
                 // sub-expression is free, while a `let` of a heavy `BoundedNat` term
                 // blocks the kernel-cheap `conv`-localized proof. Writeback/mutable and
                 // rebinding guards still apply (soundness, not text-size).
+                //
+                // EXCEPT world-derived temps (unified-backend design §5.6): a
+                // `World` term contains every store, so multi-use inlining of a
+                // value built from `__world` is the multiplicative kernel
+                // mistake — the world must always flow by variable. Any value
+                // mentioning `__world` keeps the multi-use `let` guard even in
+                // `.aborts` mode. Inert for slot-mode programs (they never
+                // bind `__world`).
                 let multi_use_block = if aborts {
-                    false
+                    use_count > 1 && mentions_world(&value)
                 } else {
                     use_count > 1 && !value.is_atomic()
                 };
@@ -363,6 +371,16 @@ fn count_effective_uses_inner(ir: &IRNode, name: &str, multiplier: usize) -> usi
     }
 }
 
+/// A value derived from the threaded `__world` variable (unified-backend
+/// design §5.6): contains the whole store, so it must flow by variable —
+/// never be duplicated by multi-use inlining. Slot-mode IR never binds
+/// `__world`, so this is inert off world-mode.
+fn mentions_world(value: &IRNode) -> bool {
+    value.iter().any(
+        |n| matches!(n, IRNode::Var(v) if v.as_ref() == crate::analysis::world_threading::WORLD_VAR),
+    )
+}
+
 /// Check whether `name` appears as `child` or `parent` in any `WriteBack` /
 /// `MutableCompose` node inside `body`. Both store temp identifiers as strings,
 /// so substituting a non-`Var` value into them is impossible.
@@ -444,6 +462,17 @@ fn is_rebound_in(name: &str, node: &IRNode) -> bool {
             is_rebound_in(name, scrutinee)
                 || cases.iter().any(|(_, _, body)| is_rebound_in(name, body))
         }
-        _ => false,
+        // WriteBack / MutableCompose store the rebound variable as a `parent` /
+        // `outer` TempId string (not an IRNode child), and the renderer emits
+        // them as `let <parent> := ...`. They effectively rebind that variable,
+        // so a temp whose value reads it must NOT be inlined past the writeback.
+        // (E.g. `vector::insert` captures `len := length(v)` BEFORE `push_back`
+        // writes back into `v`; inlining `length v` past the writeback would
+        // read the post-push length.)
+        IRNode::WriteBack { parent, .. } => parent.as_ref() == name,
+        IRNode::MutableCompose { inner, outer } => inner.as_ref() == name || outer.as_ref() == name,
+        other => other
+            .iter_children()
+            .any(|child| is_rebound_in(name, child)),
     }
 }

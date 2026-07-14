@@ -13,7 +13,10 @@ pub mod renderer;
 pub mod runtime;
 
 // Re-exports for convenience
-pub use backend::{run_backend, run_backend_with_boogie_proven, run_backend_with_options};
+pub use backend::{
+    run_backend, run_backend_with_boogie_proven, run_backend_with_options,
+    scan_lean_termination_decls, GhostNativeSeed,
+};
 pub use runtime::run_lake_build_targets;
 
 /// Tracks all .lean files written during a generation run.
@@ -101,12 +104,17 @@ pub fn write_lakefile(
     output_path: &Path,
     module_name: &str,
     packages: &[String],
+    proofs_src_dir: Option<&str>,
+    termination_src_dir: Option<&str>,
+    hooks_src_dir: Option<&str>,
     written: &mut WrittenFiles,
 ) -> anyhow::Result<()> {
-    // `moreLeanArgs := #["--tstack=131072"]` gives the Lean worker a 128 MB
+    // `moreLeanArgs := #["--tstack=1048576"]` gives the Lean worker a 1 GB
     // thread stack (default ~8 MB), which the big inlined test bodies
     // (some 8000+ lines, e.g. `Test_charge_accrued_platform_fees.lean`)
-    // need to elaborate without `Stack overflow detected. Aborting.`.
+    // and large proof-import surfaces (e.g. the bluefin tick_math bridge,
+    // which overflows a 128 MB stack on `.olean` import) need to elaborate
+    // without `Stack overflow detected. Aborting.`.
     // Without this the build dies with exit code 134 before
     // `maxRecDepth` even fires.
     let mut lakefile_content = format!(
@@ -114,7 +122,7 @@ pub fn write_lakefile(
 open Lake DSL
 
 package «{}» where
-  moreLeanArgs := #["--tstack=131072"]
+  moreLeanArgs := #["--tstack=1048576"]
 
 lean_lib Prelude where
   roots := #[`Prelude]
@@ -137,26 +145,31 @@ lean_lib {} where
         ));
     }
 
+    // Termination and Proofs libs hold user-maintained files. When the package
+    // has sources/lean/{Termination,Proofs}/, srcDir points lake at those
+    // directories so the files are built in place — no copies in the output.
+    let user_lib = |name: &str, src_dir: Option<&str>| -> String {
+        let src_line = src_dir
+            .map(|d| format!("  srcDir := \"{}\"\n", d))
+            .unwrap_or_default();
+        format!(
+            "@[default_target]\nlean_lib {} where\n{}  roots := #[`{}]\n  globs := #[.submodules `{}]\n\n",
+            name, src_line, name, name
+        )
+    };
     // Add Termination library for user-provided termination measures and proofs.
     // Generated while-loop functions reference definitions from Termination/ files.
-    lakefile_content.push_str(
-        r#"@[default_target]
-lean_lib Termination where
-  roots := #[`Termination]
-  globs := #[.submodules `Termination]
+    lakefile_content.push_str(&user_lib("Termination", termination_src_dir));
 
-"#,
-    );
+    // Add Proofs library for user-written proof files.
+    lakefile_content.push_str(&user_lib("Proofs", proofs_src_dir));
 
-    // Add Proofs library for user-written proof files (copied from sources/lean/)
-    lakefile_content.push_str(
-        r#"@[default_target]
-lean_lib Proofs where
-  roots := #[`Proofs]
-  globs := #[.submodules `Proofs]
-
-"#,
-    );
+    // Add the unified client hook library (unified-backend design §8) ONLY
+    // when the package has a sources/lean/Hooks/ directory — packages on the
+    // legacy Termination/ layout keep a byte-identical lakefile.
+    if hooks_src_dir.is_some() {
+        lakefile_content.push_str(&user_lib("Hooks", hooks_src_dir));
+    }
 
     // Add Correctness library for spec proof obligations (ensures/requires theorems)
     lakefile_content.push_str(

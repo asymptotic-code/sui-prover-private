@@ -19,6 +19,8 @@ namespace MoveVector
 def empty (tv0 : Type) [BEq tv0] [Inhabited tv0] : List tv0 :=
   []
 
+-- KNOWN INCONSISTENT as stated (models the Move VM u64-length invariant);
+-- pending the vector-subtype overhaul (unified-backend-design §13 item 4).
 axiom list_length_bounded (tv0 : Type) (v : List tv0) : v.length < 2^64
 
 def length (tv0 : Type) [BEq tv0] [Inhabited tv0] (v : List tv0) : BoundedNat (2^64) :=
