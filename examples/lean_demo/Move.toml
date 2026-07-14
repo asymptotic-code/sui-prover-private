@@ -1,0 +1,8 @@
+[package]
+name = "lean_demo"
+edition = "2024.beta"
+
+[addresses]
+lean_demo = "0x0"
+
+[dependencies]
