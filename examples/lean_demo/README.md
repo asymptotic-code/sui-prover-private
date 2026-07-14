@@ -29,15 +29,17 @@ The same [`math.move`](sources/math.move) module also contains:
 - `clamp`, with nested branches and a precondition.
 - `distance`, with guarded subtraction and path-sensitive underflow checks.
 
-## Generate
+## Generate and prove
 
 ```bash
 cd examples/lean_demo
 sui-prover --backend lean --generate-only
+lake build
 ```
 
-The translation is written to `output/lean_demo/Math.lean`, with proof stubs in
-`sources/lean/Proofs/MathProofs.lean`.
+The translation is written to `output/lean_demo/Math.lean`. The proofs in
+`sources/lean/Proofs/MathProofs.lean` use Z3 through `lean-auto`; SMT results
+are trusted rather than reconstructed. Z3 4.12.2 or newer must be on `PATH`.
 
 ```lean
 @[reducible] def max (a : BoundedNat (2^64)) (b : BoundedNat (2^64)) : BoundedNat (2^64) :=
