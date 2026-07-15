@@ -1,7 +1,7 @@
 module lean_demo::math;
 
 #[spec_only]
-use prover::prover::{ensures, implies, requires};
+use prover::prover::{asserts, ensures, implies, requires};
 
 public fun max(a: u64, b: u64): u64 {
     if (a >= b) a else b
@@ -51,4 +51,47 @@ fun distance_spec(a: u64, b: u64): u64 {
     ensures(implies(a == b, result == 0));
     ensures(implies(result == 0, a == b));
     result
+}
+
+const EInsufficientBalance: u64 = 0;
+const EBalanceOverflow: u64 = 1;
+
+public struct Balance has store {
+    value: u64,
+}
+
+public fun withdraw(balance: &mut Balance, amount: u64): u64 {
+    assert!(amount <= balance.value, EInsufficientBalance);
+    balance.value = balance.value - amount;
+    amount
+}
+
+#[spec(prove)]
+fun withdraw_spec(balance: &mut Balance, amount: u64): u64 {
+    let balance_before = balance.value;
+    asserts(amount <= balance_before);
+    let result = withdraw(balance, amount);
+    ensures(result == amount);
+    ensures(balance.value == balance_before - amount);
+    result
+}
+
+public fun transfer(from: &mut Balance, to: &mut Balance, amount: u64) {
+    assert!(to.value <= std::u64::max_value!() - amount, EBalanceOverflow);
+    let withdrawn = withdraw(from, amount);
+    to.value = to.value + withdrawn;
+}
+
+#[spec(prove)]
+fun transfer_spec(from: &mut Balance, to: &mut Balance, amount: u64) {
+    let from_before = from.value;
+    let to_before = to.value;
+    asserts(amount <= from_before);
+    asserts(to_before <= std::u64::max_value!() - amount);
+    transfer(from, to, amount);
+    ensures(from.value == from_before - amount);
+    ensures(to.value == to_before + amount);
+    ensures(
+        (from.value as u128) + (to.value as u128) == (from_before as u128) + (to_before as u128),
+    );
 }
