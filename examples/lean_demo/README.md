@@ -28,6 +28,8 @@ The same [`math.move`](sources/math.move) module also contains:
 
 - `clamp`, with nested branches and a precondition.
 - `distance`, with guarded subtraction and path-sensitive underflow checks.
+- `withdraw`, which updates a `Balance` under an insufficient-funds abort contract.
+- `transfer`, which updates two balances and preserves their combined `u128` value.
 
 ## Generate and prove
 
