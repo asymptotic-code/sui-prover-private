@@ -51,6 +51,12 @@ docs/content/references/framework/**
 lcov.info
 
 output/
+!examples/lean_demo/output/
+examples/lean_demo/output/**
+!examples/lean_demo/output/lean_demo/
+!examples/lean_demo/output/lean_demo/Math.lean
+!examples/lean_demo/output/Correctness/
+!examples/lean_demo/output/Correctness/Math.lean
 *.bpl.log
 .sparse
 
