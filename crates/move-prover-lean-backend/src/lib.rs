@@ -6,7 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const LEAN_AUTO_URL: &str = "https://github.com/leanprover-community/lean-auto.git";
-const LEAN_AUTO_REV: &str = "fcbce0f216e71516e88b784944636da4d28ee780";
+const LEAN_AUTO_REV: &str = "ddb9ccff912aa70123d8b82e070daaac248b9ff5";
 
 pub mod backend;
 pub mod escape;
