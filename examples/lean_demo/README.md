@@ -39,9 +39,10 @@ sui-prover --backend lean --generate-only
 lake -d output build
 ```
 
-The translation is written to `output/lean_demo/Math.lean`. The proofs in
-`sources/lean/Proofs/MathProofs.lean` use Z3 through `lean-auto`; SMT results
-are trusted rather than reconstructed. Z3 must be on `PATH`.
+The checked-in [translation](output/lean_demo/Math.lean) and
+[correctness wiring](output/Correctness/Math.lean) are refreshed by generation.
+The [proofs](sources/lean/Proofs/MathProofs.lean) use Z3 through `lean-auto`;
+SMT results are trusted rather than reconstructed. Z3 must be on `PATH`.
 
 ```lean
 @[reducible] def max (a : BoundedNat (2^64)) (b : BoundedNat (2^64)) : BoundedNat (2^64) :=
