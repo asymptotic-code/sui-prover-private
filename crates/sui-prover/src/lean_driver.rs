@@ -70,7 +70,11 @@ fn build_lean_pipeline(
         Box<dyn move_stackless_bytecode::function_target_pipeline::FunctionTargetProcessor>,
     > = vec![
         if test_mode {
-            LeanVerificationAnalysisProcessor::new_for_testing(include_all, test_filter, keep_functions)
+            LeanVerificationAnalysisProcessor::new_for_testing(
+                include_all,
+                test_filter,
+                keep_functions,
+            )
         } else {
             LeanVerificationAnalysisProcessor::new(include_all, keep_functions)
         },
@@ -111,9 +115,7 @@ fn build_lean_pipeline(
 
 fn world_mode_keep_functions(
     model: &GlobalEnv,
-) -> std::collections::BTreeSet<
-    move_model::model::QualifiedId<move_model::model::FunId>,
-> {
+) -> std::collections::BTreeSet<move_model::model::QualifiedId<move_model::model::FunId>> {
     let package_dir = std::env::current_dir()
         .expect("world_mode_keep_functions: cwd must be the package root after build_model");
     let decls = move_prover_lean_backend::scan_lean_termination_decls(
@@ -303,12 +305,6 @@ pub async fn execute_backend_lean(
     let package_dir = std::env::current_dir()?;
     let output_dir = resolve_output_dir(output_dir, &package_dir)?;
 
-    let boogie_proven_names: std::collections::HashSet<String> = package_targets
-        .boogie_proven_specs()
-        .iter()
-        .map(|qid| model.get_function(*qid).get_name_str())
-        .collect();
-
     init_global_number_state(&model, &prover_options);
     let spec_modules: Vec<_> = package_targets.target_modules().into_iter().collect();
     let targets = if spec_modules.is_empty() {
@@ -343,13 +339,12 @@ pub async fn execute_backend_lean(
         merged.expect("non-empty spec module set produced a target holder")
     };
 
-    move_prover_lean_backend::run_backend_with_boogie_proven(
+    move_prover_lean_backend::run_backend_with_ghost_seed(
         &model,
         &targets,
         &output_dir,
         &package_dir,
         generate_only,
-        &boogie_proven_names,
         derive_ghost_native_seed(&model, package_targets),
     )
     .await

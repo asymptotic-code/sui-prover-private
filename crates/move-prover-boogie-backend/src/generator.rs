@@ -22,7 +22,7 @@ use move_model::{
     model::{FunId, GlobalEnv, Loc, ModuleId, QualifiedId},
     ty::Type,
 };
-use move_stackless_bytecode::package_targets::PackageTargets;
+use move_stackless_bytecode::package_targets::{PackageTargets, SpecBackend};
 use move_stackless_bytecode::{
     escape_analysis::EscapeAnalysisProcessor,
     function_target_pipeline::{
@@ -110,7 +110,8 @@ pub async fn run_move_prover_with_model<W: WriteColor>(
         options.filter.clone(),
         !options.prover.ci,
         options.backend.prelude_extra.as_deref(),
-    );
+    )
+    .select_backend(SpecBackend::Boogie);
 
     // Until this point, prover and docgen have same code. Here we part ways.
     if options.run_docgen {
@@ -797,7 +798,11 @@ pub async fn verify_boogie(
     run_on: Option<String>,
     loc: Loc,
 ) -> anyhow::Result<()> {
-    let file_name = format!("{}/{}.bpl", options.output_path, target_name);
+    // Qualified Move names contain `::`, which is not legal in Windows file
+    // names. Keep the logical target name unchanged, but use a portable name
+    // for the generated Boogie artifact and its adjacent `.log` file.
+    let artifact_name = portable_artifact_name(&target_name);
+    let file_name = format!("{}/{}.bpl", options.output_path, artifact_name);
 
     debug!("writing boogie to `{}`", &file_name);
 
@@ -857,6 +862,28 @@ pub async fn verify_boogie(
     }
 
     Ok(())
+}
+
+fn portable_artifact_name(name: &str) -> String {
+    name.chars()
+        .map(|c| match c {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
+            _ => c,
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod artifact_name_tests {
+    use super::portable_artifact_name;
+
+    #[test]
+    fn qualified_move_name_is_portable() {
+        assert_eq!(
+            portable_artifact_name("basic::increment_spec"),
+            "basic__increment_spec"
+        );
+    }
 }
 
 /// Write spec hierarchy log files for all specs in the given targets.

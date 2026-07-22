@@ -106,6 +106,21 @@ Output is written to `output/`.
 
 See the [Lean generation example](examples/lean_demo/README.md).
 
+### Select a backend per specification
+
+Specifications run on both backends by default. Assign one backend with an
+external attribute when a proof is intentionally backend-specific:
+
+```move
+#[ext(backend=b"lean")]
+#[spec(prove)]
+fun my_lean_proof(...) { ... }
+```
+
+Accepted values are `b"lean"`, `b"boogie"`, and `b"both"`. The command-line
+`--backend` option automatically selects matching specifications. The separate
+`run_on=b"local" | b"cloud"` spec option controls where Boogie executes.
+
 ## Claude Code Integration
 
 Install the Sui Prover skill for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) to get AI-assisted specification writing, verification debugging, and prover guidance.

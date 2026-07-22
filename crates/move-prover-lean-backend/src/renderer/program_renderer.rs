@@ -2505,18 +2505,7 @@ fn generate_correctness_files(
             };
             let is_aborts = func.name.contains(".aborts");
 
-            // Hybrid Boogie+Lean: specs marked `#[spec(prove, run_on="boogie")]`
-            // are trusted to be proven by the Boogie backend. Declare their
-            // obligation as a trusted `axiom` instead of `theorem ... := by
-            // sorry` -- visible to `#print axioms` so the trust boundary stays
-            // auditable, and so the Lean proof agent only tackles the rest.
-            let boogie_proven = {
-                let bare = func.name.split('.').next().unwrap_or(func.name.as_str());
-                program.boogie_proven_specs.contains(bare)
-            };
-            let decl_kw = if boogie_proven { "axiom" } else { "theorem" };
-
-            body.push_str(&format!("{} {}_proved", decl_kw, escaped_name));
+            body.push_str(&format!("theorem {}_proved", escaped_name));
 
             // Type parameters with constraints
             for tp in &type_param_names {
@@ -2848,13 +2837,7 @@ fn generate_correctness_files(
                 }
             }
 
-            if boogie_proven {
-                // Trusted axiom: no proof body. The statement is asserted
-                // because the Boogie backend proved the semantically-equivalent
-                // obligation. `axiom` (not `sorry`) keeps it greppable via
-                // `#print axioms`.
-                body.push_str("\n\n");
-            } else if this_proved {
+            if this_proved {
                 let proof_ref = if is_multi_ns {
                     format!("{}.{}.{}", proof_ns, namespace, flat_name)
                 } else {
@@ -3093,14 +3076,12 @@ fn generate_correctness_files(
 
             // Build starter proof stub: theorem flat_name (params) : proposition := by sorry
             // Skip if already emitted (dedup for merged modules with shared specs)
-            // Skip entirely for Boogie-proven specs: the obligation is a trusted
-            // axiom, so there's no user proof to write.
             let starter_key = if is_multi_ns {
                 format!("{}.{}", namespace, flat_name)
             } else {
                 flat_name.clone()
             };
-            if !boogie_proven && !starter_emitted.contains(&starter_key) {
+            if !starter_emitted.contains(&starter_key) {
                 starter_emitted.insert(starter_key);
                 // For multi-namespace files, scope each theorem in its namespace
                 if is_multi_ns && starter_ns != Some(namespace.as_str()) {

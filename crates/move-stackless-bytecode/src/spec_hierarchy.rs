@@ -109,7 +109,8 @@ fn write_spec_log_file(
     output_dir: &Path,
     excluded_addresses: &[BigUint],
 ) {
-    let log_file_path = output_dir.join(format!("{}{}", spec_name, LOG_FILE_EXTENSION));
+    let portable_spec_name = portable_file_stem(&spec_name);
+    let log_file_path = output_dir.join(format!("{}{}", portable_spec_name, LOG_FILE_EXTENSION));
 
     let mut content = String::new();
     let mut displayed = BTreeSet::new();
@@ -128,6 +129,26 @@ fn write_spec_log_file(
 
     if let Err(e) = fs::write(&log_file_path, content) {
         eprintln!("Failed to write log file {:?}: {}", log_file_path, e);
+    }
+}
+
+fn portable_file_stem(name: &str) -> String {
+    name
+        .chars()
+        .map(|c| match c {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
+            _ => c,
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::portable_file_stem;
+
+    #[test]
+    fn qualified_move_name_is_portable() {
+        assert_eq!(portable_file_stem("basic::max_spec"), "basic__max_spec");
     }
 }
 

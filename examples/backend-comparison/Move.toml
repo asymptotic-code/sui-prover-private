@@ -1,0 +1,6 @@
+[package]
+name = "BackendComparison"
+edition = "2024.beta"
+
+[addresses]
+backend_comparison = "0x0"

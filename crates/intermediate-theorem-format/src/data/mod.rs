@@ -302,13 +302,6 @@ pub struct Program {
     /// Synthetic TypedMap function IDs for rewritten dynamic field operations.
     /// Set by the dynamic_field_rewriting pass.
     pub typed_map_functions: Option<crate::analysis::dynamic_field_rewriting::TypedMapFunctions>,
-    /// Bare spec-function names (e.g. `abs_spec`) marked
-    /// `#[spec(prove, run_on="boogie")]`: trusted to be proven by the Boogie
-    /// backend. The renderer emits their correctness obligations as a trusted
-    /// `axiom` instead of `theorem ... := by sorry`, so a hybrid Boogie+Lean
-    /// pipeline only hands the remainder to the Lean proof agent. Populated by
-    /// the backend from `FunctionTargetsHolder::is_boogie_proven`.
-    pub boogie_proven_specs: std::collections::HashSet<String>,
     /// Maps a loop-bearing function's base name (e.g. `pool_token_exchange_rate_at_epoch`)
     /// to the FunctionID of its `#[spec_only(loop_inv(target=...))]` invariant.
     /// Set by the program builder from the loop_inv attribute. Used to thread the

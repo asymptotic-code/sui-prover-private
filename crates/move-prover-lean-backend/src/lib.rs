@@ -17,7 +17,7 @@ pub mod runtime;
 
 // Re-exports for convenience
 pub use backend::{
-    run_backend, run_backend_with_boogie_proven, run_backend_with_options,
+    run_backend, run_backend_with_ghost_seed, run_backend_with_options,
     scan_lean_termination_decls, GhostNativeSeed,
 };
 pub use runtime::run_lake_build_targets;
@@ -157,7 +157,14 @@ lean_lib {} where
     // directories so the files are built in place — no copies in the output.
     let user_lib = |name: &str, src_dir: Option<&str>| -> String {
         let src_line = src_dir
-            .map(|d| format!("  srcDir := \"{}\"\n", d))
+            .map(|d| {
+                // Lake/Lean string literals treat `\` as an escape, so a Windows
+                // path (incl. the `\\?\` UNC prefix from canonicalize) is invalid.
+                // Strip the UNC prefix and use forward slashes (accepted by lake
+                // on Windows).
+                let d = d.strip_prefix(r"\\?\").unwrap_or(d).replace('\\', "/");
+                format!("  srcDir := \"{}\"\n", d)
+            })
             .unwrap_or_default();
         format!(
             "@[default_target]\nlean_lib {} where\n{}  roots := #[`{}]\n  globs := #[.submodules `{}]\n\n",

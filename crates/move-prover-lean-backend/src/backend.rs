@@ -55,13 +55,12 @@ pub async fn run_backend(
     package_dir: &Path,
     generate_only: bool,
 ) -> anyhow::Result<()> {
-    run_backend_with_boogie_proven(
+    run_backend_with_ghost_seed(
         env,
         targets,
         output_dir,
         package_dir,
         generate_only,
-        &std::collections::HashSet::new(),
         Vec::new(),
     )
     .await
@@ -73,18 +72,14 @@ pub async fn run_backend(
 /// threaded through to `ProgramBuilder`. Empty = ghost threading is inert.
 pub type GhostNativeSeed = Vec<(QualifiedId<FunId>, Vec<(MoveType, MoveType)>)>;
 
-/// Like [`run_backend`] but lets the caller supply the set of bare spec
-/// names marked `#[spec(prove, run_on="boogie")]`. Their correctness
-/// obligations render as trusted `axiom`s instead of `theorem ... := by
-/// sorry`. The caller computes the set from the authoritative
-/// `PackageTargets` (the merged `FunctionTargetsHolder` is lossy in All mode).
-pub async fn run_backend_with_boogie_proven(
+/// Like [`run_backend`] but lets the caller provide Move-level ghost-native
+/// metadata collected from the package targets.
+pub async fn run_backend_with_ghost_seed(
     env: &GlobalEnv,
     targets: &FunctionTargetsHolder,
     output_dir: &Path,
     package_dir: &Path,
     generate_only: bool,
-    boogie_proven_names: &std::collections::HashSet<String>,
     ghost_native_seed: GhostNativeSeed,
 ) -> anyhow::Result<()> {
     run_backend_inner(
@@ -94,7 +89,6 @@ pub async fn run_backend_with_boogie_proven(
         package_dir,
         generate_only,
         false, // test_mode: build with BuildMode::Spec (prune #[test] items)
-        boogie_proven_names,
         ghost_native_seed,
     )
     .await
@@ -119,7 +113,6 @@ pub async fn run_backend_with_options(
         package_dir,
         generate_only,
         test_mode,
-        &std::collections::HashSet::new(),
         ghost_native_seed,
     )
     .await
@@ -132,7 +125,6 @@ async fn run_backend_inner(
     package_dir: &Path,
     generate_only: bool,
     test_mode: bool,
-    boogie_proven_names: &std::collections::HashSet<String>,
     ghost_native_seed: GhostNativeSeed,
 ) -> anyhow::Result<()> {
     let overall_start = std::time::Instant::now();
@@ -196,19 +188,6 @@ async fn run_backend_inner(
         "⏱ IR translation took: {}ms",
         build_start.elapsed().as_millis()
     );
-
-    // Hybrid Boogie+Lean: specs marked `#[spec(prove, run_on="boogie")]` are
-    // trusted to be proven by the Boogie backend. The caller passes their bare
-    // Move function names (computed from the authoritative PackageTargets) so
-    // the renderer emits a trusted `axiom` for their correctness obligations
-    // instead of `theorem ... := by sorry`.
-    program.boogie_proven_specs = boogie_proven_names.clone();
-    if !program.boogie_proven_specs.is_empty() {
-        eprintln!(
-            "ℹ {} spec(s) marked run_on=\"boogie\" -> emitted as trusted axiom",
-            program.boogie_proven_specs.len()
-        );
-    }
 
     // Validate IR before rendering (catches undefined variables, type mismatches, etc.)
     let validation_start = std::time::Instant::now();

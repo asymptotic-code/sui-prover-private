@@ -2,9 +2,10 @@ use crate::target_filter::TargetFilterOptions;
 use codespan_reporting::diagnostic::Severity;
 use move_binary_format::file_format::FunctionHandleIndex;
 use move_compiler::{
-    expansion::ast::{ModuleAccess, ModuleAccess_, ModuleIdent_},
+    expansion::ast::{ModuleAccess, ModuleAccess_, ModuleIdent_, Value_},
     shared::known_attributes::{
-        AttributeKind_, ExternalAttribute, KnownAttribute, VerificationAttribute,
+        AttributeKind_, ExternalAttribute, ExternalAttributeEntry_, ExternalAttributeValue_,
+        KnownAttribute, VerificationAttribute,
     },
 };
 use move_ir_types::location::Spanned;
@@ -19,7 +20,21 @@ use std::{
 };
 
 /// Valid values for the `run_on` attribute in `#[spec(prove, run_on="...")]`.
-pub const VALID_RUN_ON_VALUES: &[&str] = &["local", "cloud", "boogie"];
+pub const VALID_RUN_ON_VALUES: &[&str] = &["local", "cloud"];
+pub const VALID_BACKEND_VALUES: &[&str] = &["lean", "boogie", "both"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpecBackend {
+    Lean,
+    Boogie,
+    Both,
+}
+
+impl SpecBackend {
+    pub fn includes(self, selected: SpecBackend) -> bool {
+        self == SpecBackend::Both || self == selected
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ModuleExternalSpecAttribute {
@@ -48,6 +63,8 @@ pub struct PackageTargets {
     spec_boogie_options: BTreeMap<QualifiedId<FunId>, String>,
     spec_timeouts: BTreeMap<QualifiedId<FunId>, u64>,
     spec_run_on: BTreeMap<QualifiedId<FunId>, String>,
+    spec_backend: BTreeMap<QualifiedId<FunId>, SpecBackend>,
+    backend_excluded_specs: BTreeSet<QualifiedId<FunId>>,
     loop_invariant_candidates: BTreeMap<QualifiedId<FunId>, Vec<(QualifiedId<FunId>, usize)>>,
     module_external_attributes: BTreeMap<ModuleId, BTreeSet<ModuleExternalSpecAttribute>>,
     function_external_attributes:
@@ -90,6 +107,8 @@ impl PackageTargets {
             spec_boogie_options: BTreeMap::new(),
             spec_timeouts: BTreeMap::new(),
             spec_run_on: BTreeMap::new(),
+            spec_backend: BTreeMap::new(),
+            backend_excluded_specs: BTreeSet::new(),
             loop_invariant_candidates: BTreeMap::new(),
             module_external_attributes: BTreeMap::new(),
             function_external_attributes: BTreeMap::new(),
@@ -397,6 +416,7 @@ impl PackageTargets {
             .get_(&AttributeKind_::Spec)
             .map(|attr| &attr.value)
         {
+            self.collect_spec_backend(func_env);
             if let Some(attrs) = Self::handle_explicit_spec_attributes(
                 &func_env.module_env,
                 explicit_spec_modules,
@@ -543,6 +563,95 @@ impl PackageTargets {
                 }
             }
         }
+    }
+
+    fn collect_spec_backend(&mut self, func_env: &FunctionEnv) {
+        let Some(KnownAttribute::External(ExternalAttribute { attrs })) = func_env
+            .get_toplevel_attributes()
+            .get_(&AttributeKind_::External)
+            .map(|attr| &attr.value)
+        else {
+            return;
+        };
+
+        for (_, _, entry) in attrs {
+            let ExternalAttributeEntry_::Assigned(name, value) = &entry.value else {
+                continue;
+            };
+            if name.value.as_str() != "backend" {
+                continue;
+            }
+            let ExternalAttributeValue_::Value(value) = &value.value else {
+                func_env.module_env.env.diag(
+                    Severity::Error,
+                    &func_env.module_env.env.to_loc(&entry.loc),
+                    "backend must be a byte string: b\"lean\", b\"boogie\", or b\"both\"",
+                );
+                continue;
+            };
+            let bytes = match &value.value {
+                Value_::Bytearray(bytes) | Value_::InferredString(bytes) => bytes,
+                _ => {
+                    func_env.module_env.env.diag(
+                        Severity::Error,
+                        &func_env.module_env.env.to_loc(&entry.loc),
+                        "backend must be a byte string: b\"lean\", b\"boogie\", or b\"both\"",
+                    );
+                    continue;
+                }
+            };
+            let Ok(backend) = std::str::from_utf8(bytes) else {
+                func_env.module_env.env.diag(
+                    Severity::Error,
+                    &func_env.module_env.env.to_loc(&entry.loc),
+                    "backend must be valid UTF-8",
+                );
+                continue;
+            };
+            let backend = match backend {
+                "lean" => SpecBackend::Lean,
+                "boogie" => SpecBackend::Boogie,
+                "both" => SpecBackend::Both,
+                other => {
+                    func_env.module_env.env.diag(
+                        Severity::Error,
+                        &func_env.module_env.env.to_loc(&entry.loc),
+                        &format!(
+                            "invalid backend value \"{}\". Valid values are: {}",
+                            other,
+                            VALID_BACKEND_VALUES.join(", ")
+                        ),
+                    );
+                    continue;
+                }
+            };
+            self.spec_backend
+                .insert(func_env.get_qualified_id(), backend);
+        }
+    }
+
+    pub fn select_backend(mut self, backend: SpecBackend) -> Self {
+        let excluded: Vec<_> = self
+            .target_specs
+            .iter()
+            .copied()
+            .filter(|qid| !self.backend_for(qid).includes(backend))
+            .collect();
+        for qid in excluded {
+            self.target_specs.remove(&qid);
+            self.focus_specs.remove(&qid);
+            self.target_no_abort_check_functions.remove(&qid);
+            self.no_verify_specs.insert(qid);
+            self.backend_excluded_specs.insert(qid);
+        }
+        self
+    }
+
+    pub fn backend_for(&self, qid: &QualifiedId<FunId>) -> SpecBackend {
+        self.spec_backend
+            .get(qid)
+            .copied()
+            .unwrap_or(SpecBackend::Both)
     }
 
     fn check_abort_check_scope(&mut self, func_env: &FunctionEnv) {
@@ -1018,7 +1127,7 @@ impl PackageTargets {
     pub fn spec_abort_check_verify_modules(&self) -> BTreeSet<ModuleId> {
         self.no_verify_specs
             .iter()
-            .filter(|qid| !self.is_system_spec(*qid))
+            .filter(|qid| !self.is_system_spec(*qid) && !self.backend_excluded_specs.contains(*qid))
             .map(|qid| qid.module_id)
             .collect()
     }
@@ -1077,17 +1186,6 @@ impl PackageTargets {
 
     pub fn spec_run_on(&self) -> &BTreeMap<QualifiedId<FunId>, String> {
         &self.spec_run_on
-    }
-
-    /// Specs marked `#[spec(prove, run_on="boogie")]`. The Lean backend
-    /// emits these obligations as trusted axioms (the hybrid Boogie+Lean
-    /// flow proves them on the Boogie side).
-    pub fn boogie_proven_specs(&self) -> BTreeSet<QualifiedId<FunId>> {
-        self.spec_run_on
-            .iter()
-            .filter(|(_, value)| value.as_str() == "boogie")
-            .map(|(qid, _)| *qid)
-            .collect()
     }
 
     pub fn loop_invariant_candidates(

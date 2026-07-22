@@ -21,7 +21,7 @@ use move_package::{BuildConfig as MoveBuildConfig, LintFlag};
 use move_prover_boogie_backend::boogie_backend::options::BoogieFileMode;
 use move_prover_boogie_backend::generator::run_boogie_gen;
 use move_stackless_bytecode::function_stats;
-use move_stackless_bytecode::package_targets::PackageTargets;
+use move_stackless_bytecode::package_targets::{PackageTargets, SpecBackend};
 use move_stackless_bytecode::target_filter::TargetFilterOptions;
 use std::{
     collections::BTreeMap,
@@ -256,7 +256,12 @@ pub async fn execute(
             String::from_utf8_lossy(buffer.as_slice())
         ));
     }
-    let package_targets = PackageTargets::new(&model, filter.clone(), !general_config.ci, None);
+    let selected_backend = match general_config.backend {
+        Backend::Boogie => SpecBackend::Boogie,
+        Backend::Lean => SpecBackend::Lean,
+    };
+    let package_targets = PackageTargets::new(&model, filter.clone(), !general_config.ci, None)
+        .select_backend(selected_backend);
 
     general_config.skip_spec_no_abort = general_config.skip_spec_no_abort
         || package_targets.has_focus_specs()
