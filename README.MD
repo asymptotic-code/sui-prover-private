@@ -119,7 +119,9 @@ fun my_lean_proof(...) { ... }
 
 Accepted values are `b"lean"`, `b"boogie"`, and `b"both"`. The command-line
 `--backend` option automatically selects matching specifications. The separate
-`run_on=b"local" | b"cloud"` spec option controls where Boogie executes.
+`run_on=b"local" | b"cloud"` spec option controls where Boogie executes. Lean
+renders explicitly Boogie-owned correctness obligations as trusted `axiom`
+declarations so cross-backend contracts remain composable and auditable.
 
 ## Claude Code Integration
 

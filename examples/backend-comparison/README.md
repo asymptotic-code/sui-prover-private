@@ -40,8 +40,10 @@ The accepted values are `b"lean"`, `b"boogie"`, and `b"both"`. A missing
 attribute defaults to `both`, preserving the behavior of existing packages.
 `--backend lean` verifies `lean` and `both` specifications; `--backend boogie`
 verifies `boogie` and `both` specifications. Specifications assigned to the
-other backend remain available as trusted summaries for calls from selected
-specifications, but do not produce verification or no-abort jobs.
+other backend do not produce verification or no-abort jobs. During Lean
+generation, explicitly Boogie-owned correctness obligations are emitted as
+trusted `axiom` declarations so Lean proofs can compose with Boogie-established
+contracts and the trust boundary remains visible to `#print axioms`.
 
 This is separate from `#[spec(..., run_on=b"local" | b"cloud")]`, which chooses
 where a Boogie job executes rather than which proof backend owns it. `run_on`
@@ -78,6 +80,6 @@ annotation (or changing it to `b"both"`) exposes the intentionally
 Boogie-hostile nonlinear arithmetic VC and reproduces the timeout above.
 
 The package also contains `boogie_only.move`, with a Boogie-only identity
-contract and no Lean proof file. It verifies under Boogie and is omitted from
-Lean generation. `basic.move` demonstrates both an explicit `b"both"` contract
-and contracts with the default behavior.
+contract and no Lean proof file. It verifies under Boogie; Lean emits its
+correctness obligations as explicit axioms. `basic.move` demonstrates both an
+explicit `b"both"` contract and contracts with the default behavior.

@@ -2504,8 +2504,14 @@ fn generate_correctness_files(
                 available_proofs.contains(&flat_name)
             };
             let is_aborts = func.name.contains(".aborts");
+            let bare_spec_name = func.name.split('.').next().unwrap_or(func.name.as_str());
+            let module_name = &program.modules.get(func.module_id).name;
+            let boogie_backend = program
+                .boogie_backend_specs
+                .contains(&(module_name.clone(), bare_spec_name.to_owned()));
 
-            body.push_str(&format!("theorem {}_proved", escaped_name));
+            let declaration = if boogie_backend { "axiom" } else { "theorem" };
+            body.push_str(&format!("{} {}_proved", declaration, escaped_name));
 
             // Type parameters with constraints
             for tp in &type_param_names {
@@ -2837,7 +2843,9 @@ fn generate_correctness_files(
                 }
             }
 
-            if this_proved {
+            if boogie_backend {
+                body.push_str("\n\n");
+            } else if this_proved {
                 let proof_ref = if is_multi_ns {
                     format!("{}.{}.{}", proof_ns, namespace, flat_name)
                 } else {
@@ -3081,7 +3089,7 @@ fn generate_correctness_files(
             } else {
                 flat_name.clone()
             };
-            if !starter_emitted.contains(&starter_key) {
+            if !boogie_backend && !starter_emitted.contains(&starter_key) {
                 starter_emitted.insert(starter_key);
                 // For multi-namespace files, scope each theorem in its namespace
                 if is_multi_ns && starter_ns != Some(namespace.as_str()) {

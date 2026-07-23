@@ -635,7 +635,13 @@ impl PackageTargets {
             .target_specs
             .iter()
             .copied()
-            .filter(|qid| !self.backend_for(qid).includes(backend))
+            .filter(|qid| {
+                let owner = self.backend_for(qid);
+                !owner.includes(backend)
+                    // Lean must translate Boogie-owned specs in order to emit
+                    // their correctness faces as explicit trusted axioms.
+                    && !(backend == SpecBackend::Lean && owner == SpecBackend::Boogie)
+            })
             .collect();
         for qid in excluded {
             self.target_specs.remove(&qid);
@@ -1186,6 +1192,17 @@ impl PackageTargets {
 
     pub fn spec_run_on(&self) -> &BTreeMap<QualifiedId<FunId>, String> {
         &self.spec_run_on
+    }
+
+    /// Specs explicitly assigned to the Boogie backend. A Lean run renders
+    /// their correctness obligations as trusted axioms so other Lean proofs
+    /// can compose with contracts established by Boogie.
+    pub fn boogie_backend_specs(&self) -> BTreeSet<QualifiedId<FunId>> {
+        self.spec_backend
+            .iter()
+            .filter(|(_, backend)| **backend == SpecBackend::Boogie)
+            .map(|(qid, _)| *qid)
+            .collect()
     }
 
     pub fn loop_invariant_candidates(

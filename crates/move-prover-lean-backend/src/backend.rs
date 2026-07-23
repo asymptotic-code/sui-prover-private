@@ -61,6 +61,7 @@ pub async fn run_backend(
         output_dir,
         package_dir,
         generate_only,
+        &std::collections::HashSet::new(),
         Vec::new(),
     )
     .await
@@ -80,6 +81,7 @@ pub async fn run_backend_with_ghost_seed(
     output_dir: &Path,
     package_dir: &Path,
     generate_only: bool,
+    boogie_backend_specs: &std::collections::HashSet<(String, String)>,
     ghost_native_seed: GhostNativeSeed,
 ) -> anyhow::Result<()> {
     run_backend_inner(
@@ -89,6 +91,7 @@ pub async fn run_backend_with_ghost_seed(
         package_dir,
         generate_only,
         false, // test_mode: build with BuildMode::Spec (prune #[test] items)
+        boogie_backend_specs,
         ghost_native_seed,
     )
     .await
@@ -113,6 +116,7 @@ pub async fn run_backend_with_options(
         package_dir,
         generate_only,
         test_mode,
+        &std::collections::HashSet::new(),
         ghost_native_seed,
     )
     .await
@@ -125,6 +129,7 @@ async fn run_backend_inner(
     package_dir: &Path,
     generate_only: bool,
     test_mode: bool,
+    boogie_backend_specs: &std::collections::HashSet<(String, String)>,
     ghost_native_seed: GhostNativeSeed,
 ) -> anyhow::Result<()> {
     let overall_start = std::time::Instant::now();
@@ -188,6 +193,8 @@ async fn run_backend_inner(
         "⏱ IR translation took: {}ms",
         build_start.elapsed().as_millis()
     );
+
+    program.boogie_backend_specs = boogie_backend_specs.clone();
 
     // Validate IR before rendering (catches undefined variables, type mismatches, etc.)
     let validation_start = std::time::Instant::now();

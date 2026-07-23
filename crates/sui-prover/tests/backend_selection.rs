@@ -80,7 +80,7 @@ fn per_spec_backend_selects_lean_boogie_both_and_default() {
     assert!(lean.contains("default_spec"));
     assert!(lean.contains("both_spec"));
     assert!(lean.contains("lean_spec"));
-    assert!(!lean.contains("boogie_spec"));
+    assert!(lean.contains("boogie_spec"));
 
     let boogie = selected_spec_names(SpecBackend::Boogie);
     assert!(boogie.contains("default_spec"));

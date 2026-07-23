@@ -305,8 +305,25 @@ pub async fn execute_backend_lean(
     let package_dir = std::env::current_dir()?;
     let output_dir = resolve_output_dir(output_dir, &package_dir)?;
 
+    let boogie_backend_qids = package_targets.boogie_backend_specs();
+    let boogie_backend_specs: std::collections::HashSet<(String, String)> = boogie_backend_qids
+        .iter()
+        .map(|qid| {
+            let func = model.get_function(*qid);
+            (
+                    model
+                        .symbol_pool()
+                        .string(func.module_env.get_name().name())
+                        .to_string(),
+                func.get_name_str(),
+            )
+        })
+        .collect();
+
     init_global_number_state(&model, &prover_options);
-    let spec_modules: Vec<_> = package_targets.target_modules().into_iter().collect();
+    let mut spec_modules = package_targets.target_modules();
+    spec_modules.extend(boogie_backend_qids.iter().map(|qid| qid.module_id));
+    let spec_modules: Vec<_> = spec_modules.into_iter().collect();
     let targets = if spec_modules.is_empty() {
         create_and_process_targets(
             &model,
@@ -345,6 +362,7 @@ pub async fn execute_backend_lean(
         &output_dir,
         &package_dir,
         generate_only,
+        &boogie_backend_specs,
         derive_ghost_native_seed(&model, package_targets),
     )
     .await
