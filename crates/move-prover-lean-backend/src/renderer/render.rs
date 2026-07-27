@@ -975,7 +975,11 @@ pub fn render<'a, W: Write>(
             // re-anchors the write-back on it. The inner `: World` annotation
             // still types the `setDf` result.
             let world_borrow = is_world_struct_type(state_type, ctx);
-            let recon_binder = if world_borrow { "fun __world => (" } else { "(" };
+            let recon_binder = if world_borrow {
+                "fun __world => ("
+            } else {
+                "("
+            };
             if val_is_multiline {
                 ctx.write("Mutable.mkFlip (fun ");
                 ctx.write(&escape::escape_identifier(reconstruct_param));

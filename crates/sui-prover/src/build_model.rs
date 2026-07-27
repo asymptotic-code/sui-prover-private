@@ -6,7 +6,6 @@ use move_package::{
     package_lock::PackageLock, resolution::resolution_graph::ResolvedGraph,
     source_package::layout::SourcePackageLayout, BuildConfig as MoveBuildConfig,
 };
-use std::str::FromStr;
 use move_stackless_bytecode::{
     function_target_pipeline::{
         FunctionHolderTarget, FunctionTargetPipeline, FunctionTargetsHolder,
@@ -14,6 +13,7 @@ use move_stackless_bytecode::{
     package_targets::PackageTargets,
 };
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use termcolor::Buffer;
 
 use crate::{

@@ -196,9 +196,9 @@ pub fn run_lean_tests(
         for module_plan in plan.module_tests.values_mut() {
             let addr = module_plan.module_id.address().to_canonical_string(true);
             let module = module_plan.module_id.name().to_string();
-            module_plan
-                .tests
-                .retain(|name, _| !missing_set.contains(&format!("{}::{}::{}", addr, module, name)));
+            module_plan.tests.retain(|name, _| {
+                !missing_set.contains(&format!("{}::{}::{}", addr, module, name))
+            });
         }
         plan.module_tests.retain(|_, m| !m.tests.is_empty());
 
@@ -760,7 +760,11 @@ impl std::fmt::Debug for LeanExecutor {
 ///
 /// stdout/stderr are drained on dedicated threads to avoid a
 /// pipe-buffer deadlock if the driver emits output before the timer.
-fn run_with_timeout(mut cmd: Command, driver_rel: &str, timeout_secs: u64) -> Result<Option<Output>> {
+fn run_with_timeout(
+    mut cmd: Command,
+    driver_rel: &str,
+    timeout_secs: u64,
+) -> Result<Option<Output>> {
     use std::io::Read;
     #[cfg(unix)]
     use std::os::unix::process::CommandExt;

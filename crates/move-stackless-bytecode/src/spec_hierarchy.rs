@@ -133,8 +133,7 @@ fn write_spec_log_file(
 }
 
 fn portable_file_stem(name: &str) -> String {
-    name
-        .chars()
+    name.chars()
         .map(|c| match c {
             '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
             _ => c,
