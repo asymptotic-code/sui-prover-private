@@ -21,6 +21,7 @@ use std::{
 
 /// Valid values for the `run_on` attribute in `#[spec(prove, run_on="...")]`.
 pub const VALID_RUN_ON_VALUES: &[&str] = &["local", "cloud"];
+/// Valid values for the `backend` attribute in `#[ext(backend = b"...")]`.
 pub const VALID_BACKEND_VALUES: &[&str] = &["lean", "boogie", "both"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -444,6 +445,19 @@ impl PackageTargets {
                 if VALID_RUN_ON_VALUES.contains(&run_on_value.as_str()) {
                     self.spec_run_on
                         .insert(func_env.get_qualified_id(), run_on_value.clone());
+                } else if VALID_BACKEND_VALUES.contains(&run_on_value.as_str()) {
+                    env.diag(
+                        Severity::Error,
+                        &func_env.get_loc(),
+                        &format!(
+                            "\"{}\" is a verification backend, not a run location. \
+                             Use #[ext(backend = b\"{}\")] to select the backend. \
+                             Valid run_on values are: {}",
+                            run_on_value,
+                            run_on_value,
+                            VALID_RUN_ON_VALUES.join(", ")
+                        ),
+                    );
                 } else {
                     env.diag(
                         Severity::Error,
@@ -612,6 +626,21 @@ impl PackageTargets {
                 "lean" => SpecBackend::Lean,
                 "boogie" => SpecBackend::Boogie,
                 "both" => SpecBackend::Both,
+                other if VALID_RUN_ON_VALUES.contains(&other) => {
+                    func_env.module_env.env.diag(
+                        Severity::Error,
+                        &func_env.module_env.env.to_loc(&entry.loc),
+                        &format!(
+                            "\"{}\" is a run location, not a verification backend. \
+                             Use #[spec(prove, run_on = b\"{}\")] to select where \
+                             verification runs. Valid backend values are: {}",
+                            other,
+                            other,
+                            VALID_BACKEND_VALUES.join(", ")
+                        ),
+                    );
+                    continue;
+                }
                 other => {
                     func_env.module_env.env.diag(
                         Severity::Error,
