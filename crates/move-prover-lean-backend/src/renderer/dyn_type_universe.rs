@@ -523,7 +523,10 @@ fn struct_uid_field(struct_id: StructID, program: &Program) -> Option<String> {
     }
     let s = program.structs.get(&struct_id);
     let f0 = s.fields.first()?;
-    if let Type::Struct { struct_id: fsid, .. } = &f0.field_type {
+    if let Type::Struct {
+        struct_id: fsid, ..
+    } = &f0.field_type
+    {
         if program.structs.has(*fsid) && program.structs.get(fsid).name == "UID" {
             return Some(crate::escape::escape_identifier(&f0.name).to_string());
         }

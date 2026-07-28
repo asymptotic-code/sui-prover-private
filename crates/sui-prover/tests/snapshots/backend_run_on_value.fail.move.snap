@@ -1,0 +1,10 @@
+---
+source: crates/sui-prover/tests/integration.rs
+expression: output
+---
+exiting with bytecode transformation errors
+error: "local" is a run location, not a verification backend. Use #[spec(prove, run_on = b"local")] to select where verification runs. Valid backend values are: lean, boogie, both
+  ┌─ tests/inputs/backend_run_on_value.fail.move:8:7
+  │
+8 │ #[ext(backend=b"local")]
+  │       ^^^^^^^^^^^^^^^^

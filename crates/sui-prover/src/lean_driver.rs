@@ -311,10 +311,10 @@ pub async fn execute_backend_lean(
         .map(|qid| {
             let func = model.get_function(*qid);
             (
-                    model
-                        .symbol_pool()
-                        .string(func.module_env.get_name().name())
-                        .to_string(),
+                model
+                    .symbol_pool()
+                    .string(func.module_env.get_name().name())
+                    .to_string(),
                 func.get_name_str(),
             )
         })
