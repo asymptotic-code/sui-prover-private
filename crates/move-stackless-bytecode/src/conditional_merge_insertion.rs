@@ -616,6 +616,12 @@ impl FunctionTargetProcessor for ConditionalMergeInsertionProcessor {
             return data;
         }
 
+        // owned by another backend: the body is never emitted here, so it does
+        // not have to satisfy the pure-function body restrictions
+        if targets.is_backend_uninterpreted(&func_env.get_qualified_id()) {
+            return data;
+        }
+
         // cannot handle mutable references
         if data.local_types.iter().any(|ty| ty.is_mutable_reference()) {
             if targets.is_pure_fun(&func_env.get_qualified_id()) {

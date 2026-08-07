@@ -1,4 +1,5 @@
 use move_compiler::{editions::Flavor, shared::known_attributes::ModeAttribute};
+use move_model::model::GlobalEnv;
 use move_package::BuildConfig as MoveBuildConfig;
 use move_stackless_bytecode::{
     package_targets::{PackageTargets, SpecBackend, VALID_RUN_ON_VALUES},
@@ -7,7 +8,7 @@ use move_stackless_bytecode::{
 use std::{collections::BTreeSet, fs};
 use sui_prover::build_model::move_model_for_package_legacy_unlocked;
 
-fn selected_spec_names(backend: SpecBackend) -> BTreeSet<String> {
+fn package_targets_for(source: &str, backend: SpecBackend) -> (GlobalEnv, PackageTargets) {
     let temp = tempfile::tempdir().unwrap();
     let prover_package = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -36,9 +37,21 @@ backend_selection = "0x42"
     )
     .unwrap();
     fs::create_dir(temp.path().join("sources")).unwrap();
-    fs::write(
-        temp.path().join("sources/backend_selection.move"),
-        r#"module backend_selection::example;
+    fs::write(temp.path().join("sources/backend_selection.move"), source).unwrap();
+
+    let mut config = MoveBuildConfig::default();
+    config.default_flavor = Some(Flavor::Sui);
+    config.modes = vec![ModeAttribute::VERIFY_ONLY.into()];
+    config.skip_fetch_latest_git_deps = true;
+    let model = move_model_for_package_legacy_unlocked(config, temp.path()).unwrap();
+    assert!(!model.has_errors());
+
+    let targets = PackageTargets::new(&model, TargetFilterOptions::default(), true, None)
+        .select_backend(backend);
+    (model, targets)
+}
+
+const SPEC_BACKENDS_SOURCE: &str = r#"module backend_selection::example;
 
 #[spec(prove)]
 fun default_spec() {}
@@ -54,21 +67,33 @@ fun lean_spec() {}
 #[ext(backend=b"boogie")]
 #[spec(prove)]
 fun boogie_spec() {}
+"#;
 
-"#,
-    )
-    .unwrap();
+const PURE_BACKENDS_SOURCE: &str = r#"module backend_selection::example;
 
-    let mut config = MoveBuildConfig::default();
-    config.default_flavor = Some(Flavor::Sui);
-    config.modes = vec![ModeAttribute::VERIFY_ONLY.into()];
-    config.skip_fetch_latest_git_deps = true;
-    let model = move_model_for_package_legacy_unlocked(config, temp.path()).unwrap();
-    assert!(!model.has_errors());
+#[ext(pure)]
+fun default_pure(x: u64): u64 { x }
 
-    PackageTargets::new(&model, TargetFilterOptions::default(), true, None)
-        .select_backend(backend)
+#[ext(pure, backend=b"lean")]
+fun lean_pure(x: u64): u64 { x }
+
+#[ext(pure, backend=b"boogie")]
+fun boogie_pure(x: u64): u64 { x }
+"#;
+
+fn selected_spec_names(backend: SpecBackend) -> BTreeSet<String> {
+    let (model, targets) = package_targets_for(SPEC_BACKENDS_SOURCE, backend);
+    targets
         .target_specs()
+        .iter()
+        .map(|qid| model.get_function(*qid).get_name_str())
+        .collect()
+}
+
+fn backend_uninterpreted_names(backend: SpecBackend) -> BTreeSet<String> {
+    let (model, targets) = package_targets_for(PURE_BACKENDS_SOURCE, backend);
+    targets
+        .backend_uninterpreted_functions()
         .iter()
         .map(|qid| model.get_function(*qid).get_name_str())
         .collect()
@@ -87,6 +112,21 @@ fn per_spec_backend_selects_lean_boogie_both_and_default() {
     assert!(boogie.contains("both_spec"));
     assert!(boogie.contains("boogie_spec"));
     assert!(!boogie.contains("lean_spec"));
+}
+
+#[test]
+fn lean_owned_pure_is_uninterpreted_under_boogie_only() {
+    let boogie = backend_uninterpreted_names(SpecBackend::Boogie);
+    assert_eq!(
+        boogie,
+        BTreeSet::from(["lean_pure".to_string()]),
+        "only the lean-owned pure loses its Boogie definition"
+    );
+
+    assert!(
+        backend_uninterpreted_names(SpecBackend::Lean).is_empty(),
+        "a Lean run keeps every pure function definition"
+    );
 }
 
 #[test]

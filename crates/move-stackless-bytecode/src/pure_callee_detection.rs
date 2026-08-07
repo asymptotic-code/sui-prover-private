@@ -26,7 +26,10 @@ impl FunctionTargetProcessor for PureCalleeDetectionProcessor {
         let mut queue: VecDeque<_> = targets
             .get_funs()
             .into_iter()
-            .filter(|qid| targets.is_pure_fun(qid) || targets.is_axiom_fun(qid))
+            .filter(|qid| {
+                (targets.is_pure_fun(qid) || targets.is_axiom_fun(qid))
+                    && !targets.is_backend_uninterpreted(qid)
+            })
             .collect();
 
         while let Some(qid) = queue.pop_front() {

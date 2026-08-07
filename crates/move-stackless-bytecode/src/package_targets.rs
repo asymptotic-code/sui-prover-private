@@ -58,6 +58,11 @@ pub struct PackageTargets {
     focus_specs: BTreeSet<QualifiedId<FunId>>,
     scenario_specs: BTreeSet<QualifiedId<FunId>>,
     globally_uninterpreted_functions: BTreeSet<QualifiedId<FunId>>,
+    /// Pure functions whose definition belongs to another backend (e.g.
+    /// `#[ext(pure)] #[ext(backend=b"lean")]` under a Boogie run). Their body
+    /// is never modelled here: they are declared as uninterpreted Boogie
+    /// functions and exempt from the pure-function body checks.
+    backend_uninterpreted_functions: BTreeSet<QualifiedId<FunId>>,
     // functions that should be uninterpreted when verifying a specific spec function.
     spec_uninterpreted_functions: BTreeMap<QualifiedId<FunId>, BTreeSet<QualifiedId<FunId>>>,
     spec_interpreted_functions: BTreeMap<QualifiedId<FunId>, BTreeSet<QualifiedId<FunId>>>,
@@ -103,6 +108,7 @@ impl PackageTargets {
             focus_specs: BTreeSet::new(),
             scenario_specs: BTreeSet::new(),
             globally_uninterpreted_functions: BTreeSet::new(),
+            backend_uninterpreted_functions: BTreeSet::new(),
             spec_uninterpreted_functions: BTreeMap::new(),
             spec_interpreted_functions: BTreeMap::new(),
             spec_boogie_options: BTreeMap::new(),
@@ -289,6 +295,7 @@ impl PackageTargets {
         // This ensures pure_functions is populated before we validate uninterpreted targets
         for module_env in env.get_modules() {
             for func_env in module_env.get_functions() {
+                self.collect_spec_backend(&func_env);
                 self.check_spec_scope(&func_env);
                 self.check_spec_only_scope(&func_env);
                 self.check_abort_check_scope(&func_env);
@@ -417,7 +424,6 @@ impl PackageTargets {
             .get_(&AttributeKind_::Spec)
             .map(|attr| &attr.value)
         {
-            self.collect_spec_backend(func_env);
             if let Some(attrs) = Self::handle_explicit_spec_attributes(
                 &func_env.module_env,
                 explicit_spec_modules,
@@ -678,6 +684,24 @@ impl PackageTargets {
             self.target_no_abort_check_functions.remove(&qid);
             self.no_verify_specs.insert(qid);
             self.backend_excluded_specs.insert(qid);
+        }
+        if backend == SpecBackend::Boogie {
+            // A pure function owned by another backend has no definition here.
+            // Keep it in `pure_functions` so call sites still resolve to its
+            // `$pure` name, but declare it uninterpreted: same arguments give
+            // the same value and nothing else is assumed about it. Its no-abort
+            // obligation belongs to the owning backend too.
+            let foreign: Vec<_> = self
+                .pure_functions
+                .iter()
+                .copied()
+                .filter(|qid| !self.backend_for(qid).includes(backend))
+                .collect();
+            for qid in foreign {
+                self.backend_uninterpreted_functions.insert(qid);
+                self.globally_uninterpreted_functions.insert(qid);
+                self.target_no_abort_check_functions.remove(&qid);
+            }
         }
         self
     }
@@ -1285,6 +1309,14 @@ impl PackageTargets {
 
     pub fn globally_uninterpreted_functions(&self) -> &BTreeSet<QualifiedId<FunId>> {
         &self.globally_uninterpreted_functions
+    }
+
+    pub fn is_backend_uninterpreted(&self, func_id: &QualifiedId<FunId>) -> bool {
+        self.backend_uninterpreted_functions.contains(func_id)
+    }
+
+    pub fn backend_uninterpreted_functions(&self) -> &BTreeSet<QualifiedId<FunId>> {
+        &self.backend_uninterpreted_functions
     }
 
     pub fn spec_uninterpreted_functions(

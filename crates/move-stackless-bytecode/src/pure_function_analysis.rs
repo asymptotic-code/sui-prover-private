@@ -151,6 +151,12 @@ impl FunctionTargetProcessor for PureFunctionAnalysisProcessor {
             return data;
         }
 
+        // owned by another backend: only the signature is modelled here, the
+        // body is emitted as an uninterpreted declaration and never inspected
+        if targets.is_backend_uninterpreted(&qid) {
+            return data;
+        }
+
         if !deterministic_analysis::get_info(&data).is_deterministic {
             let msg = if is_callee {
                 format!(

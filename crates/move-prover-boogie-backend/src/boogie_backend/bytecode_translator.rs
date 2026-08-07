@@ -269,7 +269,19 @@ impl<'env> BoogieTranslator<'env> {
                     boogie_type(self.env, ty.skip_reference())
                 )
             })
-            .join(", ");
+            .collect::<Vec<_>>();
+
+        // Boogie functions return a single value, so a multi-return signature is
+        // wrapped in the same tuple datatype the call sites expect.
+        let rets = if rets.len() > 1 {
+            let dt_name = format!("{}_opaque_return_type", func_name);
+            emitln!(self.writer, "datatype {} {{", dt_name);
+            emitln!(self.writer, "    {}({})", dt_name, rets.join(", "));
+            emitln!(self.writer, "}\n");
+            format!("$ret: {}", dt_name)
+        } else {
+            rets.join(", ")
+        };
 
         emitln!(
             self.writer,
@@ -2358,12 +2370,7 @@ impl<'env> FunctionTranslator<'env> {
 
         let attribs = match &fun_target.data.variant {
             FunctionVariant::Baseline => {
-                if emit_pure_in_place
-                    && self
-                        .parent
-                        .targets
-                        .is_uninterpreted(&self.fun_target.func_env.get_qualified_id())
-                {
+                if emit_pure_in_place && self.pure_is_uninterpreted() {
                     // Uninterpreted functions have no body, so no inline attribute
                     "".to_string()
                 } else if emit_pure_in_place {
@@ -2447,6 +2454,14 @@ impl<'env> FunctionTranslator<'env> {
             args,
             rets,
         )
+    }
+
+    /// A `$pure` declaration is emitted without a body when the function is
+    /// marked uninterpreted, or when its definition belongs to another backend.
+    fn pure_is_uninterpreted(&self) -> bool {
+        let qid = self.fun_target.func_env.get_qualified_id();
+        self.parent.targets.is_uninterpreted(&qid)
+            || self.parent.targets.is_backend_uninterpreted(&qid)
     }
 
     fn wrap_return_datatype_name(&self) -> String {
@@ -2592,15 +2607,9 @@ impl<'env> FunctionTranslator<'env> {
         writer.set_location(&fun_target.get_loc().at_start());
 
         // For pure functions marked as uninterpreted, emit uninterpreted (no body)
-        if emit_pure_in_place {
-            if self
-                .parent
-                .targets
-                .is_uninterpreted(&self.fun_target.func_env.get_qualified_id())
-            {
-                emitln!(writer, ";");
-                return;
-            }
+        if emit_pure_in_place && self.pure_is_uninterpreted() {
+            emitln!(writer, ";");
+            return;
         }
 
         emitln!(writer, "{");

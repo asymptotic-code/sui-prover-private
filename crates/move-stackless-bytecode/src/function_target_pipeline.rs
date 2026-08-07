@@ -327,6 +327,13 @@ impl FunctionTargetsHolder {
         self.package_targets.pure_callees().contains(id)
     }
 
+    /// A pure function whose definition lives in another backend. The body is
+    /// not modelled here, so it is neither checked for purity nor translated:
+    /// only an uninterpreted declaration is emitted.
+    pub fn is_backend_uninterpreted(&self, id: &QualifiedId<FunId>) -> bool {
+        self.package_targets.is_backend_uninterpreted(id)
+    }
+
     pub fn add_pure_callee(&mut self, id: QualifiedId<FunId>) {
         self.package_targets.add_pure_callee(id);
     }
