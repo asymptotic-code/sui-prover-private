@@ -468,18 +468,10 @@ impl<'env> VersionState<'env> {
         for (&var, &then_ver) in &then_versions {
             let else_ver = else_versions[&var];
             if then_ver != else_ver {
-                assert!(
-                    then_ver != var,
-                    "then_ver is the original variable {} at pc {}",
-                    var,
-                    cond_at
-                );
-                assert!(
-                    else_ver != var,
-                    "else_ver is the original variable {} at pc {}",
-                    var,
-                    cond_at
-                );
+                // A version equal to `var` itself is valid here: the variable was
+                // not (re)assigned on that path — a one-armed `if`, or an `else`
+                // that leaves it untouched — so it still holds its pre-branch
+                // value and the merge reads the original temp on that side.
                 let fresh = if self.completed_at.get(&var) == Some(&cond_at) {
                     self.completed.insert(var);
                     var
