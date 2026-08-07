@@ -35,6 +35,15 @@ impl SpecBackend {
     pub fn includes(self, selected: SpecBackend) -> bool {
         self == SpecBackend::Both || self == selected
     }
+
+    /// The spelling accepted by `#[ext(backend = b"...")]`.
+    pub fn name(self) -> &'static str {
+        match self {
+            SpecBackend::Lean => "lean",
+            SpecBackend::Boogie => "boogie",
+            SpecBackend::Both => "both",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -711,6 +720,123 @@ impl PackageTargets {
             .get(qid)
             .copied()
             .unwrap_or(SpecBackend::Both)
+    }
+
+    /// Report specs verified on `backend` that depend on definitions owned by a
+    /// different one. Two shapes, two severities:
+    ///
+    /// * ERROR -- the spec's own conditions reach a function pinned elsewhere:
+    ///   a foreign `#[ext(pure)]` helper, or a native modelled only there. Here
+    ///   it is uninterpreted, so the condition mentioning it carries no content
+    ///   and the spec silently proves less than it reads.
+    /// * WARNING -- the target's body calls a function whose own spec is pinned
+    ///   elsewhere. Only that one summary is missing, which weakens the proof
+    ///   rather than voiding it, and is often deliberate.
+    pub fn check_backend_mixing(&self, env: &GlobalEnv, backend: SpecBackend) {
+        for spec in &self.target_specs {
+            if self.is_system_spec(spec) {
+                continue;
+            }
+            let spec_env = env.get_function(*spec);
+            let target = self.find_target_spec(spec);
+
+            for foreign in
+                self.foreign_condition_deps(env, spec_env.get_qualified_id(), target, backend)
+            {
+                let owner = self.backend_for(&foreign);
+                env.diag(
+                    Severity::Error,
+                    &spec_env.get_loc(),
+                    &format!(
+                        "spec {} uses {}-owned {}; pin it with #[ext(backend=b\"{}\")] \
+                         or remove the dependency",
+                        spec_env.get_full_name_str(),
+                        owner.name(),
+                        env.get_function(foreign).get_full_name_str(),
+                        owner.name(),
+                    ),
+                );
+            }
+
+            let Some(target) = target else {
+                continue;
+            };
+            for (fun, foreign_spec) in self.foreign_summary_deps(env, target) {
+                env.diag(
+                    Severity::Warning,
+                    &spec_env.get_loc(),
+                    &format!(
+                        "spec {} calls {}, whose spec {} is {}-owned; its summary is \
+                         not available here",
+                        spec_env.get_full_name_str(),
+                        env.get_function(fun).get_full_name_str(),
+                        env.get_function(foreign_spec).get_full_name_str(),
+                        self.backend_for(&foreign_spec).name(),
+                    ),
+                );
+            }
+        }
+    }
+
+    /// Functions reachable from a spec's conditions -- its body minus the call
+    /// to the target -- whose definition belongs to another backend.
+    fn foreign_condition_deps(
+        &self,
+        env: &GlobalEnv,
+        spec: QualifiedId<FunId>,
+        target: Option<QualifiedId<FunId>>,
+        backend: SpecBackend,
+    ) -> BTreeSet<QualifiedId<FunId>> {
+        let mut foreign = BTreeSet::new();
+        let mut seen = BTreeSet::new();
+        let mut queue: Vec<_> = env
+            .get_function(spec)
+            .get_called_functions()
+            .into_iter()
+            .collect();
+        while let Some(qid) = queue.pop() {
+            if Some(qid) == target || self.is_spec(&qid) || !seen.insert(qid) {
+                continue;
+            }
+            if !self.backend_for(&qid).includes(backend) {
+                foreign.insert(qid);
+                continue;
+            }
+            queue.extend(env.get_function(qid).get_called_functions());
+        }
+        foreign
+    }
+
+    /// Functions the target reaches whose own spec is owned by another backend,
+    /// paired with that spec. A function carrying a spec is not descended into:
+    /// its summary stands in for the body.
+    fn foreign_summary_deps(
+        &self,
+        env: &GlobalEnv,
+        target: QualifiedId<FunId>,
+    ) -> BTreeSet<(QualifiedId<FunId>, QualifiedId<FunId>)> {
+        let mut foreign = BTreeSet::new();
+        let mut seen = BTreeSet::new();
+        let mut queue: Vec<_> = env
+            .get_function(target)
+            .get_called_functions()
+            .into_iter()
+            .collect();
+        while let Some(qid) = queue.pop() {
+            if !seen.insert(qid) {
+                continue;
+            }
+            if let Some(specs) = self.all_specs.get(&qid) {
+                for spec in specs {
+                    if self.backend_excluded_specs.contains(spec) {
+                        foreign.insert((qid, *spec));
+                    }
+                }
+                continue;
+            }
+            queue.extend(env.get_function(qid).get_called_functions());
+        }
+        foreign
     }
 
     fn check_abort_check_scope(&mut self, func_env: &FunctionEnv) {

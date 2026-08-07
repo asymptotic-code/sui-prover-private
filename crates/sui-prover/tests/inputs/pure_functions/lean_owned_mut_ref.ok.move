@@ -1,6 +1,7 @@
 /// A lean-owned pure helper that probes a copy through a mutable reference.
 /// Boogie cannot model such a body as a function, but it never has to: the
-/// helper is emitted as an uninterpreted declaration.
+/// helper is emitted as an uninterpreted declaration, and only the Lean-pinned
+/// spec names it.
 module 0x42::lean_owned_mut_ref;
 
 #[spec_only]
@@ -20,10 +21,22 @@ public fun first_or_zero(v: &vector<u64>): u64 {
     if (v.is_empty()) 0 else v[0]
 }
 
+#[ext(backend=b"lean")]
 #[spec(prove)]
 fun first_or_zero_spec(v: &vector<u64>): u64 {
     requires(grows_by_one(v));
     let result = first_or_zero(v);
     ensures(result == if (v.is_empty()) 0 else v[0]);
+    result
+}
+
+public fun last_or_zero(v: &vector<u64>): u64 {
+    if (v.is_empty()) 0 else v[v.length() - 1]
+}
+
+#[spec(prove)]
+fun last_or_zero_spec(v: &vector<u64>): u64 {
+    let result = last_or_zero(v);
+    ensures(result == if (v.is_empty()) 0 else v[v.length() - 1]);
     result
 }

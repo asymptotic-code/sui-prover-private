@@ -113,6 +113,10 @@ pub async fn run_move_prover_with_model<W: WriteColor>(
     )
     .select_backend(SpecBackend::Boogie);
 
+    // Diagnostics only: reported by the bytecode-transformation error check
+    // downstream, together with everything else collect_targets found.
+    targets.check_backend_mixing(&env, SpecBackend::Boogie);
+
     // Until this point, prover and docgen have same code. Here we part ways.
     if options.run_docgen {
         //return run_docgen(env, &options, error_writer, now);

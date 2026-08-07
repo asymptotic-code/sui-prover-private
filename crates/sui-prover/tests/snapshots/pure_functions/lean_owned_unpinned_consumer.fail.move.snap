@@ -1,0 +1,15 @@
+---
+source: crates/sui-prover/tests/integration.rs
+expression: output
+---
+exiting with bytecode transformation errors
+error: spec lean_owned_unpinned_consumer::double_spec uses lean-owned lean_owned_unpinned_consumer::bounded; pin it with #[ext(backend=b"lean")] or remove the dependency
+   ┌─ tests/inputs/pure_functions/lean_owned_unpinned_consumer.fail.move:20:1
+   │  
+20 │ ╭ fun double_spec(x: u64): u64 {
+21 │ │     requires(bounded(x, 100));
+22 │ │     let result = double(x);
+23 │ │     ensures(result == x * 2);
+24 │ │     result
+25 │ │ }
+   │ ╰─^
