@@ -678,14 +678,28 @@ impl FunctionTargetProcessor for ConditionalMergeInsertionProcessor {
 
             // step 4: traverse structured control flow, collecting merges
             state.process_block(&structured_block);
-
-            // step 5: emit merges
-            state.emit_merges();
         }
 
-        // step 6: merge early returns for pure/axiom functions
+        // step 5: merge early returns for pure/axiom functions.
+        //
+        // This MUST run before `emit_merges`. `structured_block` holds code
+        // offsets valid for the code as it stands now; `emit_merges` inserts
+        // merge instructions, which shifts every offset after the first
+        // insertion point. `merge_return_temps` reads `Ret` instructions out of
+        // those offsets and silently falls back to the fallthrough value when it
+        // does not find one, so running it on shifted offsets drops whole
+        // branches and collapses the function to a constant.
+        //
+        // Order is safe the other way around: `merge_returns` rewrites `Ret` in
+        // place (no shift) and appends its merges plus the single `Ret` at the
+        // very end, past every insertion point `emit_merges` knows about.
         if is_pure && ret_count > 1 {
             state.merge_returns(&structured_block);
+        }
+
+        // step 6: emit merges
+        if !state.current_version.is_empty() {
+            state.emit_merges();
         }
 
         state.builder.data

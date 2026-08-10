@@ -1,0 +1,55 @@
+---
+source: crates/sui-prover/tests/integration.rs
+assertion_line: 289
+expression: output
+---
+Verification successful
+
+============ generated Boogie ================
+
+function {:inline} $42_pure_boogie_early_return_tail_fits$pure(_$t0: int, _$t1: int) returns ($ret0: bool)
+{
+    (var $t4 := 0;
+    (var $t5 := $IsEqual'u64'(_$t0, $t4);
+    (var $t6 := true;
+    (var $t7 := 0;
+    (var $t8 := (_$t1 > $t7);
+    (var $t9 := 1;
+    (var $t10 := (_$t1 - $t9);
+    (var $t3 := (if $t8 then $t10 else _$t1);
+    (var $t11 := (_$t0 <= $t3);
+    (var $t12 := true;
+    (var $t13 := $t12;
+    (var $t14 := $IsEqual'u64'(_$t0, _$t1);
+    (var $t2 := (if $t11 then $t13 else $t14);
+    (var $t15 := (if $t5 then $t6 else $t2);
+    $t15))))))))))))))
+}
+
+function {:inline} $42_pure_boogie_early_return_tail_in_range$pure(_$t0: int, _$t1: int, _$t2: int) returns ($ret0: bool)
+{
+    (var $t4 := 0;
+    (var $t5 := $IsEqual'u64'(_$t1, $t4);
+    (var $t6 := true;
+    (var $t7 := (_$t2 > _$t1);
+    (var $t8 := (_$t2 - _$t1);
+    (var $t3 := (if $t7 then $t8 else _$t2);
+    (var $t9 := (_$t0 <= $t3);
+    (var $t10 := (if $t5 then $t6 else $t9);
+    $t10))))))))
+}
+
+function {:inline} $42_pure_boogie_early_return_tail_in_range_nested$pure(_$t0: int, _$t1: int, _$t2: int) returns ($ret0: bool)
+{
+    (var $t6 := 0;
+    (var $t7 := $IsEqual'u64'(_$t1, $t6);
+    (var $t8 := true;
+    (var $t9 := $t8;
+    (var $t10 := (_$t2 > _$t1);
+    (var $t11 := (_$t2 - _$t1);
+    (var $t12 := _$t2;
+    (var $t3 := (if $t10 then $t11 else $t12);
+    (var $t13 := (_$t0 <= $t3);
+    (var $t4 := (if $t7 then $t9 else $t13);
+    $t4))))))))))
+}

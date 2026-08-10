@@ -7,6 +7,7 @@ use move_prover_boogie_backend::{
     generator::run_move_prover_with_model, generator_options::Options,
 };
 use regex::Regex;
+use std::collections::BTreeMap;
 use std::fs::{copy, create_dir_all, read_to_string};
 use std::path::{Path, PathBuf};
 use sui_prover::build_model::move_model_for_package_legacy_unlocked;
@@ -91,10 +92,18 @@ integration-test = "0x9"
         }
     }
 
-    // Check if this is a conditionals test
-    let is_conditionals_test = file_path
+    // Tests under `pure_boogie/` snapshot the generated Boogie for the module's
+    // `$pure` functions on top of the verification verdict, so a regression that
+    // silently changes what a pure function *means* (rather than whether it
+    // verifies) shows up in the diff.
+    let is_pure_boogie_test = file_path
         .components()
-        .any(|c| c.as_os_str().to_string_lossy() == "conditionals");
+        .any(|c| c.as_os_str().to_string_lossy() == "pure_boogie");
+
+    let output_dir = Path::new(&Options::default().output_path)
+        .join(relative_path.with_extension(""))
+        .to_string_lossy()
+        .to_string();
 
     // Setup cleanup that will execute even in case of panic or early return
     let result = std::panic::catch_unwind(|| {
@@ -117,10 +126,7 @@ integration-test = "0x9"
                 options.backend.debug_trace = false;
                 options.prover.debug_trace = false;
                 options.backend.keep_artifacts = true;
-                options.output_path = Path::new(&options.output_path)
-                    .join(relative_path.with_extension(""))
-                    .to_string_lossy()
-                    .to_string();
+                options.output_path = output_dir.clone();
 
                 // Use a buffer to capture output instead of stderr
                 let mut error_buffer = Buffer::no_color();
@@ -161,13 +167,70 @@ integration-test = "0x9"
     });
 
     // Now handle the result of our operation
-    match result {
+    let output = match result {
         Ok(output) => output,
         Err(err) => format!(
             "Verification failed, panic during verification: {:?}",
             err.downcast_ref::<String>().unwrap_or(&String::new())
         ),
+    };
+
+    if is_pure_boogie_test {
+        format!(
+            "{output}\n============ generated Boogie ================\n\n{}",
+            extract_test_pure_functions(&output_dir)
+        )
+    } else {
+        output
     }
+}
+
+/// Collect the bodies of the `$pure` Boogie functions the test module itself
+/// declares (test modules all live at address `0x42`, so framework `$pure`
+/// helpers are filtered out by name).
+///
+/// A run emits one `.bpl` per spec and each carries only the pure functions that
+/// spec reaches, so every file is scanned and the definitions are keyed by name:
+/// the result is the union, in a stable order, regardless of directory order.
+fn extract_test_pure_functions(output_dir: &str) -> String {
+    let bpl_files = match std::fs::read_dir(output_dir) {
+        Ok(entries) => entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().map_or(false, |ext| ext == "bpl"))
+            .collect::<Vec<PathBuf>>(),
+        Err(_) => return "<no output directory>".to_string(),
+    };
+
+    let mut by_name: BTreeMap<String, String> = BTreeMap::new();
+    for path in bpl_files {
+        let Ok(content) = read_to_string(&path) else {
+            continue;
+        };
+        let mut lines = content.lines();
+        while let Some(line) = lines.next() {
+            if !(line.starts_with("function") && line.contains("$42_") && line.contains("$pure(")) {
+                continue;
+            }
+            let name = line
+                .split_once("$pure(")
+                .map(|(head, _)| head.to_string())
+                .unwrap_or_else(|| line.to_string());
+            let mut definition = vec![line.to_string()];
+            for body_line in lines.by_ref() {
+                definition.push(body_line.to_string());
+                if body_line == "}" {
+                    break;
+                }
+            }
+            by_name.insert(name, definition.join("\n"));
+        }
+    }
+
+    if by_name.is_empty() {
+        return "<no module $pure functions found>".to_string();
+    }
+    by_name.into_values().collect::<Vec<_>>().join("\n\n")
 }
 
 fn post_process_output(output: String, sources_dir: PathBuf) -> String {
@@ -195,77 +258,6 @@ fn post_process_output(output: String, sources_dir: PathBuf) -> String {
     // Use regex to replace numbers with more than one digit followed by u64 with ELIDEDu64
     let re = Regex::new(r"\d{2,}u64").unwrap();
     re.replace_all(&output, "ELIDEDu64").to_string()
-}
-
-/// Helper for extracting boogie .bpl source: get implementation from file
-fn extract_boogie_function(output_dir: &str, is_conditionals_test: bool) -> String {
-    let output_path = Path::new(output_dir);
-
-    // Try to find .bpl files in the output directory
-    if let Ok(entries) = std::fs::read_dir(output_path) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().map_or(false, |ext| ext == "bpl")
-                && !path.ends_with("spec_no_abort_check.bpl")
-            {
-                if let Ok(content) = read_to_string(&path) {
-                    // Look for both $impl and $pure functions
-                    let functions = extract_impl_and_pure_functions(&content, is_conditionals_test);
-                    if !functions.is_empty() {
-                        return functions.join("\n");
-                    }
-                }
-            }
-        }
-    }
-
-    String::new()
-}
-
-/// Helper for extracting boogie .bpl source: get $impl and $pure function bodies
-fn extract_impl_and_pure_functions(bpl_content: &str, is_conditionals_test: bool) -> Vec<String> {
-    let lines: Vec<&str> = bpl_content.lines().collect();
-    let mut results = Vec::new();
-    let mut in_target_function = false;
-    let mut brace_count = 0;
-    let mut function_lines = Vec::new();
-
-    for line in lines {
-        if (line.contains("$pure") && line.contains("function"))
-            || (line.contains("$impl") && line.contains("procedure") && is_conditionals_test)
-        {
-            in_target_function = true;
-            function_lines.push(line);
-        } else if in_target_function {
-            if line.contains("// Begin Translation") {
-                results.push(function_lines.join("\n"));
-                in_target_function = false;
-                brace_count = 0;
-                function_lines.clear();
-                continue;
-            }
-
-            function_lines.push(line);
-
-            // Count braces :3
-            for ch in line.chars() {
-                match ch {
-                    '{' => brace_count += 1,
-                    '}' => {
-                        brace_count -= 1;
-                        if brace_count == 0 && !function_lines.is_empty() {
-                            results.push(function_lines.join("\n"));
-                            function_lines.clear();
-                            in_target_function = false;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    results
 }
 
 #[dir_test(

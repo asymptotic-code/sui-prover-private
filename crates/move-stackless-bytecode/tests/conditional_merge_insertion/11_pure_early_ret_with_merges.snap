@@ -1,0 +1,111 @@
+---
+source: crates/move-stackless-bytecode/tests/testsuite.rs
+---
+============ initial translation from Move ================
+
+[variant baseline]
+public fun test::classify($t0|x: u64, $t1|y: u64): bool {
+     var $t2|acc#1#0: u64
+     var $t3: u64
+     var $t4: u64
+     var $t5: bool
+     var $t6: bool
+     var $t7: u64
+     var $t8: u64
+     var $t9: u64
+     var $t10: bool
+     var $t11: u64
+     var $t12: u64
+     var $t13: u64
+     var $t14: u64
+     var $t15: u64
+     var $t16: bool
+  0: $t3 := copy($t0)
+  1: $t4 := 0
+  2: $t5 := ==($t3, $t4)
+  3: if ($t5) goto 4 else goto 7
+  4: label L1
+  5: $t6 := true
+  6: return $t6
+  7: label L0
+  8: $t7 := copy($t1)
+  9: $t2 := $t7
+ 10: $t8 := copy($t1)
+ 11: $t9 := 100
+ 12: $t10 := >($t8, $t9)
+ 13: if ($t10) goto 14 else goto 20
+ 14: label L3
+ 15: $t11 := move($t1)
+ 16: $t12 := 100
+ 17: $t13 := -($t11, $t12)
+ 18: $t2 := $t13
+ 19: goto 20
+ 20: label L2
+ 21: $t14 := move($t2)
+ 22: $t15 := move($t0)
+ 23: $t16 := >($t14, $t15)
+ 24: return $t16
+}
+
+
+[variant baseline]
+native fun prover::__stub_placeholder();
+
+
+[variant baseline]
+native fun ghost::__stub_placeholder();
+
+
+[variant baseline]
+native fun log::__stub_placeholder();
+
+============ after pipeline `conditional_merge_insertion` ================
+
+[variant baseline]
+public fun test::classify($t0|x: u64, $t1|y: u64): bool {
+     var $t2|acc#1#0: u64
+     var $t3: u64
+     var $t4: bool
+     var $t5: bool
+     var $t6: u64
+     var $t7: bool
+     var $t8: u64
+     var $t9: bool
+     var $t10: u64
+     var $t11: u64
+     var $t12: bool
+  0: $t3 := 0
+  1: $t4 := ==($t0, $t3)
+  2: if ($t4) goto 3 else goto 6
+  3: label L1
+  4: $t5 := true
+  5: nop
+  6: label L0
+  7: $t10 := $t1
+  8: $t6 := 100
+  9: $t7 := >($t1, $t6)
+ 10: if ($t7) goto 11 else goto 14
+ 11: label L3
+ 12: $t8 := 100
+ 13: $t11 := -($t1, $t8)
+ 14: label L2
+     # conditional_merge_insertion: t2 := if_then_else(t7, t11, t10)
+ 15: $t2 := if_then_else($t7, $t11, $t10)
+ 16: $t9 := >($t2, $t0)
+ 17: nop
+     # conditional_merge_insertion: t12 := if_then_else(t4, t5, t9)
+ 18: $t12 := if_then_else($t4, $t5, $t9)
+ 19: return $t12
+}
+
+
+[variant baseline]
+native fun prover::__stub_placeholder();
+
+
+[variant baseline]
+native fun ghost::__stub_placeholder();
+
+
+[variant baseline]
+native fun log::__stub_placeholder();
