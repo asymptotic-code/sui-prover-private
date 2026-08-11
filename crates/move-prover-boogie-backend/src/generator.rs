@@ -819,6 +819,7 @@ pub async fn verify_boogie(
             writer: &writer,
             options: &options.backend,
             types: &types,
+            spec_timeout: timeout,
         };
         // Determine run location based on per-spec run_on attribute and global config
         let use_remote = match run_on.as_deref() {

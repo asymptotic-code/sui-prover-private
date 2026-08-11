@@ -62,6 +62,11 @@ pub struct BoogieWrapper<'env> {
     pub writer: &'env CodeWriter,
     pub options: &'env BoogieOptions,
     pub types: &'env BiBTreeMap<Type, String>,
+    /// The `#[spec(timeout = N)]` of the spec this file verifies, when it declares
+    /// one. Threaded from `FileOptions::timeout`, i.e. the same lookup that fed
+    /// `{:timeLimit}` into the generated Boogie, so a diagnostic can name the limit
+    /// the goal actually ran under instead of the global `--timeout`.
+    pub spec_timeout: Option<u64>,
 }
 
 /// Output of a boogie run.
@@ -1778,6 +1783,27 @@ impl<'env> BoogieWrapper<'env> {
         }
     }
 
+    /// The VC time limit that actually governed the goal reported at `loc`, and
+    /// whether the spec set it.
+    ///
+    /// This must agree with the `{:timeLimit}` attribute `generate_function_sig`
+    /// emits for the procedure, which is `get_spec_timeout(fn)` falling back to
+    /// the global `vc_timeout` -- so both read the same source, and neither
+    /// applies `adjust_timeout` (the attribute is written unadjusted).
+    fn governing_vc_timeout(&self, loc: &Loc) -> (u64, bool) {
+        if let Some(timeout) = self.spec_timeout {
+            return (timeout, true);
+        }
+        // A module-level file carries several procedures and is verified with no
+        // file-level limit, so resolve the failing one from its source location.
+        if let Some(func_env) = self.env.get_enclosing_function(loc) {
+            if let Some(timeout) = self.targets.get_spec_timeout(&func_env.get_qualified_id()) {
+                return (*timeout, true);
+            }
+        }
+        (self.options.vc_timeout as u64, false)
+    }
+
     /// Extracts inconclusive (timeout) errors.
     fn extract_inconclusive_errors(&self, out: &str) -> Vec<BoogieError> {
         INCONCLUSIVE_DIAG_STARTS
@@ -1795,18 +1821,26 @@ impl<'env> BoogieWrapper<'env> {
                     let loc = self
                         .get_loc_from_pos(make_position(line, col))
                         .unwrap_or_else(|| self.env.unknown_loc());
+                    let message = if msg.contains("out of resource") || msg.contains("timed out") {
+                        let (timeout, from_spec) = self.governing_vc_timeout(&loc);
+                        if from_spec {
+                            format!(
+                                "verification out of resources/timeout (limit {}s, from this spec's #[spec(timeout = {})])",
+                                timeout, timeout
+                            )
+                        } else {
+                            format!(
+                                "verification out of resources/timeout (limit {}s, from the global --timeout; this spec sets no #[spec(timeout = N)])",
+                                timeout
+                            )
+                        }
+                    } else {
+                        "verification inconclusive".to_string()
+                    };
                     Some(BoogieError {
                         kind: BoogieErrorKind::Inconclusive,
                         loc,
-                        message: if msg.contains("out of resource") || msg.contains("timed out") {
-                            let timeout = self.options.adjust_timeout(self.options.vc_timeout);
-                            format!(
-                                "verification out of resources/timeout (global timeout set to {}s)",
-                                timeout
-                            )
-                        } else {
-                            "verification inconclusive".to_string()
-                        },
+                        message,
                         execution_trace: vec![],
                         model: None,
                         secondary_labels: vec![],
