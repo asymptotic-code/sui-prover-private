@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use codespan_reporting::diagnostic::Severity;
 use move_model::{
     model::{FunId, FunctionEnv, GlobalEnv, QualifiedId},
@@ -160,6 +162,68 @@ impl QuantifierPattern {
             .find(|p| qid == p.start_qid || qid == p.end_qid)
             .map(|p| p.quantifier_type)
     }
+}
+
+/// The functions a quantifier in `code` will be rendered against.
+///
+/// `find_macro_patterns` rewrites each `begin_<q>_lambda .. call .. destroy ..
+/// end_<q>_lambda` chain into an `Operation::Quantifier` naming the called
+/// function, and the Boogie backend renders that function by its `$pure` name
+/// unconditionally. Emitting the `$pure` DECLARATION, though, is gated on the
+/// pure sets, so a body outside them is referenced by a program that never
+/// declares it and Boogie rejects the whole file at name resolution.
+///
+/// `validate_function_pattern_requirements` admits any function with an abort
+/// check as a body, so `#[ext(no_abort)]` qualifies just as `#[ext(pure)]`
+/// does -- the two sets are not the same, which is where the gap comes from.
+///
+/// This is a read-only pre-scan of the same chain rather than a by-product of
+/// the rewrite, because `pure_callee_detection` has to know the answer several
+/// passes earlier than `QuantifierIteratorAnalysisProcessor` runs.
+pub fn quantifier_body_functions(
+    env: &GlobalEnv,
+    code: &[Bytecode],
+) -> BTreeSet<QualifiedId<FunId>> {
+    let mut bodies = BTreeSet::new();
+    let patterns = QuantifierPattern::all_patterns(env);
+    if patterns.is_empty() {
+        return bodies;
+    }
+
+    let scanner = QuantifierIteratorAnalysisProcessor();
+    let bc = code
+        .iter()
+        .filter(|bc| !scanner.filter_traces(bc))
+        .collect::<Vec<&Bytecode>>();
+    if bc.len() < 4 {
+        return bodies;
+    }
+
+    // Most functions open no lambda at all; skipping those keeps this scan off
+    // the hot path instead of walking every pattern across every body.
+    if !patterns.iter().any(|pattern| {
+        bc.iter()
+            .any(|bc| scanner.is_searched_fn(bc, pattern.start_qid))
+    }) {
+        return bodies;
+    }
+
+    for pattern in &patterns {
+        for i in 0..bc.len() - 2 {
+            if scanner.is_fn_call(&bc[i])
+                && scanner.is_destroy(&bc[i + 1])
+                && scanner.is_searched_fn(&bc[i + 2], pattern.end_qid)
+                && scanner
+                    .get_start_func_pos_before(&bc, pattern.start_qid, i)
+                    .is_some()
+            {
+                let (_, _, _, callee_id, _) = scanner.extract_fn_call_data(&bc[i]);
+                bodies.insert(callee_id);
+            }
+        }
+    }
+
+    bodies
 }
 
 pub struct QuantifierIteratorAnalysisProcessor();
