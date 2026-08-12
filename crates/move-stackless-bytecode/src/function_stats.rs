@@ -6,7 +6,7 @@ use move_model::{
 };
 use std::collections::BTreeMap;
 
-use crate::package_targets::PackageTargets;
+use crate::package_targets::{PackageTargets, SpecBackend};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProofStatus {
@@ -94,10 +94,16 @@ fn should_include_function(func_env: &FunctionEnv, targets: &PackageTargets) -> 
 fn determine_spec_status(spec_id: &QualifiedId<FunId>, targets: &PackageTargets) -> ProofStatus {
     if targets.skipped_specs().contains_key(spec_id) {
         ProofStatus::Skipped
-    } else if targets.backend_excluded_specs().contains(spec_id) {
+    } else if !targets.is_verified_spec(spec_id)
+        && targets.backend_for(spec_id) != SpecBackend::Both
+    {
         // Owned by the other backend: `select_backend` moved it out of
         // `target_specs` precisely so this run would assume it instead of
         // proving it. That is not the same thing as lacking `prove`.
+        // Detected from the pin plus absence from `target_specs`, using only
+        // public API -- an unpinned spec defaults to `Both`, so a spec that
+        // carries a pin AND is not a target here is exactly one this backend
+        // was told to assume.
         ProofStatus::OtherBackend(targets.backend_for(spec_id).name())
     } else if !targets.is_verified_spec(spec_id) {
         ProofStatus::NoProve
