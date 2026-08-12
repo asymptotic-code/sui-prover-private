@@ -93,14 +93,14 @@ public fun test::eligible($t0|a: u64, $t1|b: u64, $t2|cap: u64): bool {
   2: if ($t5) goto 3 else goto 6
   3: label L1
   4: $t6 := true
-  5: nop
+  5: goto 22
   6: label L0
   7: $t7 := 0
   8: $t8 := ==($t1, $t7)
   9: if ($t8) goto 10 else goto 13
  10: label L3
  11: $t9 := true
- 12: nop
+ 12: goto 22
  13: label L2
  14: $t12 := $t2
  15: $t10 := >($t2, $t0)
@@ -111,7 +111,7 @@ public fun test::eligible($t0|a: u64, $t1|b: u64, $t2|cap: u64): bool {
      # conditional_merge_insertion: t3 := if_then_else(t10, t13, t12)
  20: $t3 := if_then_else($t10, $t13, $t12)
  21: $t11 := >=($t3, $t1)
- 22: nop
+ 22: label L6
      # conditional_merge_insertion: t14 := if_then_else(t8, t9, t11)
  23: $t14 := if_then_else($t8, $t9, $t11)
      # conditional_merge_insertion: t15 := if_then_else(t5, t6, t14)

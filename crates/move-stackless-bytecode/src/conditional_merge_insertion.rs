@@ -117,21 +117,51 @@ impl<'env> VersionState<'env> {
     /// Merge multiple `Ret` instructions into a single `Ret` using `IfThenElse`.
     /// Walks the structured control flow to find the return temps for each branch,
     /// collects `IfThenElse` merges where branches return different values, then
-    /// replaces all `Ret` instructions with `Nop` and appends the merges + single `Ret`.
+    /// redirects every `Ret` to a single exit label carrying the merges and the
+    /// one remaining `Ret`.
+    ///
+    /// SOUNDNESS: the redirect must be a `Jump` to that exit, never a `Nop`.
+    /// A `Nop` deletes the edge to the function exit, so the code an early
+    /// `return` was GUARDING falls through and becomes unconditional. The value
+    /// merge still picks the right result — a `$pure` Boogie function is total,
+    /// so nothing is visibly wrong there — but every effect of the skipped tail
+    /// is now on every path, and the abort obligations are effects. That is
+    /// wrong in BOTH directions:
+    ///
+    ///   * arithmetic, indexing and division the source cannot reach acquire a
+    ///     no-abort obligation (an INVENTED abort), and
+    ///   * those invented obligations then DISPLACE genuine ones from the
+    ///     report: the backend emits one `assert !$abort_flag` per site, Boogie
+    ///     stops at its per-implementation error limit and assumes an assertion
+    ///     downstream of itself, so a real abort further along the linearized
+    ///     path goes unreported (a MASKED abort, the unsound direction).
+    ///     Measured on bluefin-clmm `admin`: the early-`return` spelling
+    ///     reported three aborts the source cannot reach and hid two it can.
+    ///
+    /// Jumping instead keeps every branch body under its own guard, so the
+    /// early-`return` spelling and the equivalent nested if/else produce the
+    /// same obligations. The pure-expression generator is unaffected: it skips
+    /// `Jump`/`Label` exactly as it skipped `Nop`, and still reads the bindings
+    /// of every branch in code order.
     fn merge_returns(&mut self, structured: &StructuredBlock) {
         let mut merges = Vec::new();
         let Some(merged_rets) = self.merge_return_temps(structured, &mut merges, None) else {
             return;
         };
 
-        // replace all Ret instructions with Nop
+        // redirect all Ret instructions to the single exit
+        let exit_label = self.builder.new_label();
         for bc in &mut self.builder.data.code {
             if bc.is_return() {
-                *bc = Bytecode::Nop(bc.get_attr_id());
+                *bc = Bytecode::Jump(bc.get_attr_id(), exit_label);
             }
         }
 
-        // emit collected merges, then single Ret
+        // exit block: label, collected merges, then the single Ret.
+        // `emit` peepholes the last function-body `Jump(exit); Label(exit)` pair
+        // into a plain fallthrough.
+        self.builder
+            .emit_with(|attr| Bytecode::Label(attr, exit_label));
         for merge in merges {
             merge.emit(&mut self.builder);
         }

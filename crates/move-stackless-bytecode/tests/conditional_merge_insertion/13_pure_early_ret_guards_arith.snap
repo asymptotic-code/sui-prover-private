@@ -1,0 +1,215 @@
+---
+source: crates/move-stackless-bytecode/tests/testsuite.rs
+---
+============ initial translation from Move ================
+
+[variant baseline]
+public fun test::guarded_sub_early($t0|a: u64, $t1|b: u64): u64 {
+     var $t2: u64
+     var $t3: u64
+     var $t4: bool
+     var $t5: u64
+     var $t6: u64
+     var $t7: u64
+     var $t8: u64
+  0: $t2 := copy($t0)
+  1: $t3 := copy($t1)
+  2: $t4 := <=($t2, $t3)
+  3: if ($t4) goto 4 else goto 7
+  4: label L1
+  5: $t5 := 0
+  6: return $t5
+  7: label L0
+  8: $t6 := move($t0)
+  9: $t7 := move($t1)
+ 10: $t8 := -($t6, $t7)
+ 11: return $t8
+}
+
+
+[variant baseline]
+public fun test::guarded_sub_nested($t0|a: u64, $t1|b: u64): u64 {
+     var $t2|tmp#$2: u64
+     var $t3: u64
+     var $t4: u64
+     var $t5: bool
+     var $t6: u64
+     var $t7: u64
+     var $t8: u64
+     var $t9: u64
+     var $t10: u64
+  0: $t3 := copy($t0)
+  1: $t4 := copy($t1)
+  2: $t5 := <=($t3, $t4)
+  3: if ($t5) goto 4 else goto 8
+  4: label L1
+  5: $t6 := 0
+  6: $t2 := $t6
+  7: goto 14
+  8: label L0
+  9: $t7 := move($t0)
+ 10: $t8 := move($t1)
+ 11: $t9 := -($t7, $t8)
+ 12: $t2 := $t9
+ 13: goto 14
+ 14: label L2
+ 15: $t10 := move($t2)
+ 16: return $t10
+}
+
+
+[variant baseline]
+public fun test::three_way_early($t0|a: u64, $t1|b: u64, $t2|c: u64): u64 {
+     var $t3|x#1#0: u64
+     var $t4: u64
+     var $t5: u64
+     var $t6: bool
+     var $t7: u64
+     var $t8: u64
+     var $t9: u64
+     var $t10: u64
+     var $t11: u64
+     var $t12: u64
+     var $t13: bool
+     var $t14: u64
+     var $t15: u64
+     var $t16: u64
+     var $t17: u64
+     var $t18: u64
+     var $t19: u64
+  0: $t4 := copy($t0)
+  1: $t5 := 0
+  2: $t6 := ==($t4, $t5)
+  3: if ($t6) goto 4 else goto 7
+  4: label L1
+  5: $t7 := 0
+  6: return $t7
+  7: label L0
+  8: $t8 := move($t0)
+  9: $t9 := 1
+ 10: $t10 := -($t8, $t9)
+ 11: $t3 := $t10
+ 12: $t11 := move($t1)
+ 13: $t12 := 0
+ 14: $t13 := ==($t11, $t12)
+ 15: if ($t13) goto 16 else goto 21
+ 16: label L3
+ 17: $t14 := move($t3)
+ 18: $t15 := 10
+ 19: $t16 := +($t14, $t15)
+ 20: return $t16
+ 21: label L2
+ 22: $t17 := move($t3)
+ 23: $t18 := move($t2)
+ 24: $t19 := +($t17, $t18)
+ 25: return $t19
+}
+
+
+[variant baseline]
+native fun prover::__stub_placeholder();
+
+
+[variant baseline]
+native fun ghost::__stub_placeholder();
+
+
+[variant baseline]
+native fun log::__stub_placeholder();
+
+============ after pipeline `conditional_merge_insertion` ================
+
+[variant baseline]
+public fun test::guarded_sub_early($t0|a: u64, $t1|b: u64): u64 {
+     var $t2: bool
+     var $t3: u64
+     var $t4: u64
+     var $t5: u64
+  0: $t2 := <=($t0, $t1)
+  1: if ($t2) goto 2 else goto 5
+  2: label L1
+  3: $t3 := 0
+  4: goto 7
+  5: label L0
+  6: $t4 := -($t0, $t1)
+  7: label L2
+     # conditional_merge_insertion: t5 := if_then_else(t2, t3, t4)
+  8: $t5 := if_then_else($t2, $t3, $t4)
+  9: return $t5
+}
+
+
+[variant baseline]
+public fun test::guarded_sub_nested($t0|a: u64, $t1|b: u64): u64 {
+     var $t2|tmp#$2: u64
+     var $t3: bool
+     var $t4: u64
+     var $t5: u64
+     var $t6: u64
+  0: $t3 := <=($t0, $t1)
+  1: if ($t3) goto 2 else goto 6
+  2: label L1
+  3: $t4 := 0
+  4: $t5 := $t4
+  5: goto 8
+  6: label L0
+  7: $t6 := -($t0, $t1)
+  8: label L2
+     # conditional_merge_insertion: t2 := if_then_else(t3, t5, t6)
+  9: $t2 := if_then_else($t3, $t5, $t6)
+ 10: return $t2
+}
+
+
+[variant baseline]
+public fun test::three_way_early($t0|a: u64, $t1|b: u64, $t2|c: u64): u64 {
+     var $t3|x#1#0: u64
+     var $t4: u64
+     var $t5: bool
+     var $t6: u64
+     var $t7: u64
+     var $t8: u64
+     var $t9: u64
+     var $t10: bool
+     var $t11: u64
+     var $t12: u64
+     var $t13: u64
+     var $t14: u64
+     var $t15: u64
+  0: $t4 := 0
+  1: $t5 := ==($t0, $t4)
+  2: if ($t5) goto 3 else goto 6
+  3: label L1
+  4: $t6 := 0
+  5: goto 18
+  6: label L0
+  7: $t7 := 1
+  8: $t8 := -($t0, $t7)
+  9: $t9 := 0
+ 10: $t10 := ==($t1, $t9)
+ 11: if ($t10) goto 12 else goto 16
+ 12: label L3
+ 13: $t11 := 10
+ 14: $t12 := +($t8, $t11)
+ 15: goto 18
+ 16: label L2
+ 17: $t13 := +($t8, $t2)
+ 18: label L4
+     # conditional_merge_insertion: t14 := if_then_else(t10, t12, t13)
+ 19: $t14 := if_then_else($t10, $t12, $t13)
+     # conditional_merge_insertion: t15 := if_then_else(t5, t6, t14)
+ 20: $t15 := if_then_else($t5, $t6, $t14)
+ 21: return $t15
+}
+
+
+[variant baseline]
+native fun prover::__stub_placeholder();
+
+
+[variant baseline]
+native fun ghost::__stub_placeholder();
+
+
+[variant baseline]
+native fun log::__stub_placeholder();

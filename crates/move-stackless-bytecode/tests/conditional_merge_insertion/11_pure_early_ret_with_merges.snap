@@ -79,7 +79,7 @@ public fun test::classify($t0|x: u64, $t1|y: u64): bool {
   2: if ($t4) goto 3 else goto 6
   3: label L1
   4: $t5 := true
-  5: nop
+  5: goto 17
   6: label L0
   7: $t10 := $t1
   8: $t6 := 100
@@ -92,7 +92,7 @@ public fun test::classify($t0|x: u64, $t1|y: u64): bool {
      # conditional_merge_insertion: t2 := if_then_else(t7, t11, t10)
  15: $t2 := if_then_else($t7, $t11, $t10)
  16: $t9 := >($t2, $t0)
- 17: nop
+ 17: label L4
      # conditional_merge_insertion: t12 := if_then_else(t4, t5, t9)
  18: $t12 := if_then_else($t4, $t5, $t9)
  19: return $t12
