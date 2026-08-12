@@ -15,6 +15,11 @@ pub enum ProofStatus {
     NoProve,
     SuccessfulProof,
     IgnoreAborts,
+    /// Has `prove`, but its contract is owned by the other backend, so this
+    /// run assumes it rather than proving it. Reporting these as `NoProve`
+    /// conflated "not verified by THIS backend" with "carries no `prove`",
+    /// which made every lean-pinned spec read as unspecified.
+    OtherBackend(&'static str),
 }
 
 impl std::fmt::Display for ProofStatus {
@@ -24,6 +29,7 @@ impl std::fmt::Display for ProofStatus {
             ProofStatus::IgnoreAborts => write!(f, "⚠️  spec but with ignore_abort"),
             ProofStatus::Skipped => write!(f, "⏭️  skipped spec"),
             ProofStatus::NoProve => write!(f, "✖️ no prove"),
+            ProofStatus::OtherBackend(b) => write!(f, "🔒 proved by {b} backend"),
             ProofStatus::NoSpec => write!(f, "❌ no spec"),
         }
     }
@@ -88,6 +94,11 @@ fn should_include_function(func_env: &FunctionEnv, targets: &PackageTargets) -> 
 fn determine_spec_status(spec_id: &QualifiedId<FunId>, targets: &PackageTargets) -> ProofStatus {
     if targets.skipped_specs().contains_key(spec_id) {
         ProofStatus::Skipped
+    } else if targets.backend_excluded_specs().contains(spec_id) {
+        // Owned by the other backend: `select_backend` moved it out of
+        // `target_specs` precisely so this run would assume it instead of
+        // proving it. That is not the same thing as lacking `prove`.
+        ProofStatus::OtherBackend(targets.backend_for(spec_id).name())
     } else if !targets.is_verified_spec(spec_id) {
         ProofStatus::NoProve
     } else if targets.ignores_aborts(spec_id) {
