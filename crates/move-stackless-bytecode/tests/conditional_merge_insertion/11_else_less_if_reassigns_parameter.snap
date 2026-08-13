@@ -1,0 +1,191 @@
+---
+source: crates/move-stackless-bytecode/tests/testsuite.rs
+---
+============ initial translation from Move ================
+
+[variant baseline]
+public fun test::f($t0|value: u64): u64 {
+     var $t1|result#1#0: u64
+     var $t2: u64
+     var $t3: u64
+     var $t4: u64
+     var $t5: bool
+     var $t6: u64
+     var $t7: u8
+     var $t8: u64
+     var $t9: u64
+     var $t10: u64
+     var $t11: u64
+     var $t12: u64
+     var $t13: u64
+     var $t14: bool
+     var $t15: u64
+     var $t16: u8
+     var $t17: u64
+     var $t18: u64
+     var $t19: u64
+     var $t20: u64
+     var $t21: u64
+     var $t22: u64
+     var $t23: bool
+     var $t24: u64
+     var $t25: u8
+     var $t26: u64
+     var $t27: u64
+     var $t28: u64
+     var $t29: u64
+     var $t30: u64
+  0: $t2 := 0
+  1: $t1 := $t2
+  2: $t3 := copy($t0)
+  3: $t4 := 4294967296
+  4: $t5 := >=($t3, $t4)
+  5: if ($t5) goto 6 else goto 16
+  6: label L1
+  7: $t6 := move($t0)
+  8: $t7 := 32
+  9: $t8 := >>($t6, $t7)
+ 10: $t0 := $t8
+ 11: $t9 := move($t1)
+ 12: $t10 := 32
+ 13: $t11 := +($t9, $t10)
+ 14: $t1 := $t11
+ 15: goto 16
+ 16: label L0
+ 17: $t12 := copy($t0)
+ 18: $t13 := 65536
+ 19: $t14 := >=($t12, $t13)
+ 20: if ($t14) goto 21 else goto 31
+ 21: label L3
+ 22: $t15 := move($t0)
+ 23: $t16 := 16
+ 24: $t17 := >>($t15, $t16)
+ 25: $t0 := $t17
+ 26: $t18 := move($t1)
+ 27: $t19 := 16
+ 28: $t20 := +($t18, $t19)
+ 29: $t1 := $t20
+ 30: goto 31
+ 31: label L2
+ 32: $t21 := copy($t0)
+ 33: $t22 := 256
+ 34: $t23 := >=($t21, $t22)
+ 35: if ($t23) goto 36 else goto 46
+ 36: label L5
+ 37: $t24 := move($t0)
+ 38: $t25 := 8
+ 39: $t26 := >>($t24, $t25)
+ 40: destroy($t26)
+ 41: $t27 := move($t1)
+ 42: $t28 := 8
+ 43: $t29 := +($t27, $t28)
+ 44: $t1 := $t29
+ 45: goto 46
+ 46: label L4
+ 47: $t30 := move($t1)
+ 48: return $t30
+}
+
+
+[variant baseline]
+native fun prover::__stub_placeholder();
+
+
+[variant baseline]
+native fun ghost::__stub_placeholder();
+
+
+[variant baseline]
+native fun log::__stub_placeholder();
+
+============ after pipeline `conditional_merge_insertion` ================
+
+[variant baseline]
+public fun test::f($t0|value: u64): u64 {
+     var $t1|result#1#0: u64
+     var $t2: u64
+     var $t3: u64
+     var $t4: bool
+     var $t5: u8
+     var $t6: u64
+     var $t7: u64
+     var $t8: bool
+     var $t9: u8
+     var $t10: u64
+     var $t11: u64
+     var $t12: bool
+     var $t13: u8
+     var $t14: u64
+     var $t15: u64
+     var $t16: u64
+     var $t17: u64
+     var $t18: u64
+     var $t19: u64
+     var $t20: u64
+     var $t21: u64
+     var $t22: u64
+     var $t23: u64
+     var $t24: u64
+  0: $t2 := 0
+  1: $t16 := $t2
+  2: $t3 := 4294967296
+  3: $t4 := >=($t0, $t3)
+  4: if ($t4) goto 5 else goto 10
+  5: label L1
+  6: $t5 := 32
+  7: $t17 := >>($t0, $t5)
+  8: $t6 := 32
+  9: $t18 := +($t2, $t6)
+ 10: label L0
+     # conditional_merge_insertion: t19 := if_then_else(t4, t17, t0)
+ 11: $t19 := if_then_else($t4, $t17, $t0)
+     # conditional_merge_insertion: t20 := if_then_else(t4, t18, t16)
+ 12: $t20 := if_then_else($t4, $t18, $t16)
+ 13: $t7 := 65536
+ 14: $t8 := >=($t19, $t7)
+ 15: if ($t8) goto 16 else goto 21
+ 16: label L3
+ 17: $t9 := 16
+ 18: $t21 := >>($t19, $t9)
+ 19: $t10 := 16
+ 20: $t22 := +($t20, $t10)
+ 21: label L2
+     # conditional_merge_insertion: t0 := if_then_else(t8, t21, t19)
+ 22: $t0 := if_then_else($t8, $t21, $t19)
+     # conditional_merge_insertion: t23 := if_then_else(t8, t22, t20)
+ 23: $t23 := if_then_else($t8, $t22, $t20)
+ 24: $t11 := 256
+ 25: $t12 := >=($t0, $t11)
+ 26: if ($t12) goto 27 else goto 33
+ 27: label L5
+ 28: $t13 := 8
+ 29: $t14 := >>($t0, $t13)
+ 30: destroy($t14)
+ 31: $t15 := 8
+ 32: $t24 := +($t23, $t15)
+ 33: label L4
+     # conditional_merge_insertion: t1 := if_then_else(t12, t24, t23)
+ 34: $t1 := if_then_else($t12, $t24, $t23)
+ 35: return $t1
+}
+
+
+[variant baseline]
+native fun prover::__stub_placeholder();
+
+
+[variant baseline]
+native fun ghost::__stub_placeholder();
+
+
+[variant baseline]
+native fun log::__stub_placeholder();
+
+============ Diagnostics ================
+warning: unused assignment
+   ┌─ tests/conditional_merge_insertion/11_else_less_if_reassigns_parameter.move:33:13
+   │
+33 │             value = value >> 8;
+   │             ^^^^^ Unused assignment for variable 'value'. Consider removing, replacing with '_', or prefixing with '_' (e.g., '_value')
+   │
+   = This warning can be suppressed with '#[allow(unused_assignment)]' applied to the 'module' or module member ('const', 'fun', or 'struct')
