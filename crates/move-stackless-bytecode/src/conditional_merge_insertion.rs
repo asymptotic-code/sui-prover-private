@@ -468,18 +468,13 @@ impl<'env> VersionState<'env> {
         for (&var, &then_ver) in &then_versions {
             let else_ver = else_versions[&var];
             if then_ver != else_ver {
-                assert!(
-                    then_ver != var,
-                    "then_ver is the original variable {} at pc {}",
-                    var,
-                    cond_at
-                );
-                assert!(
-                    else_ver != var,
-                    "else_ver is the original variable {} at pc {}",
-                    var,
-                    cond_at
-                );
+                // NOTE: no `then_ver != var` / `else_ver != var` assertions here. When the `if`
+                // has no else branch, the else-side version is by definition
+                // the pre-`if` one, which for a not-yet-versioned local IS the
+                // original variable -- and reading it as the merge source is
+                // correct, since at the merge point it still holds the
+                // pre-`if` value. `process_variant_switch` models the same
+                // situation for N-way arms and asserts nothing.
                 let fresh = if self.completed_at.get(&var) == Some(&cond_at) {
                     self.completed.insert(var);
                     var
@@ -676,7 +671,21 @@ impl FunctionTargetProcessor for ConditionalMergeInsertionProcessor {
 
         if !state.current_version.is_empty() {
             // step 3: compute where each variable completes (last if-then-else with a merge instruction)
-            state.compute_completed_at(&structured_block, &BTreeSet::new());
+            //
+            // Seed with the function's PARAMETERS. A parameter holds a
+            // well-defined incoming value on every path, so it is "known" on
+            // the else side of an else-less `if` exactly as it is on the then
+            // side. Seeding an empty set instead made `compute_completed_at`
+            // skip the merge bookkeeping for any parameter first assigned
+            // inside a branch, while `process_if_then_else` went on to create a
+            // merge for it anyway -- the two phases then disagreed, which is
+            // what the version assertions below were tripping over
+            // (`bit_math::most_significant_bit` is the canonical reproducer:
+            // nine else-less `if`s each reassigning the `mut value` parameter).
+            let params: BTreeSet<usize> = (0..state.builder.fun_env.get_parameter_count())
+                .filter(|i| state.current_version.contains_key(i))
+                .collect();
+            state.compute_completed_at(&structured_block, &params);
 
             // step 4: traverse structured control flow, collecting merges
             state.process_block(&structured_block);
