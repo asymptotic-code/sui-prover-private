@@ -24,7 +24,7 @@ The Sui Prover relies on implicit dependencies. Remove any direct dependencies t
 Sui = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/sui-framework", rev = "framework/testnet", override = true }
 ```
 
-If you need to reference Sui directly, put the specs in a separate package.
+Keep prover specifications and prover-specific dependencies in a sibling Move package next to the implementation package.
 
 ## Running the Prover
 
@@ -40,7 +40,7 @@ If the user provides arguments like `$ARGUMENTS`, pass them to `sui-prover` dire
 
 ## Writing Specifications
 
-To verify a function, write a specification function annotated with `#[spec(prove)]`. The spec has the same signature as the function under test and follows this structure:
+Write specification modules in a sibling Move package that depends on the implementation package. To verify a function, write a specification function annotated with `#[spec(prove)]`. The spec has the same signature as the function under test and follows this structure:
 
 ```move
 #[spec(prove)]
@@ -85,7 +85,7 @@ module 0x43::foo_spec {
 }
 ```
 
-To access private members/functions from a cross-module spec, add `#[spec_only]` getter functions to the target module. These are only visible to the prover, not included in regular compilation.
+To access private members/functions from a cross-module spec, add `#[test_only]` getter functions to the target implementation module. The prover can use test-only code, while regular production builds omit it.
 
 ### Specifying Abort Conditions
 
@@ -127,9 +127,21 @@ fun add_spec(x: u64, y: u64): u64 {
 }
 ```
 
-### Putting Specs in a Separate Package
+### Put Specs in a Separate Package
 
-Currently, specs may cause compile errors when placed alongside regular Move code due to prover-specific changes in the compilation pipeline. If this happens, create a separate package for specs and use the `target` attribute to reference functions in the original package.
+Always place specification modules in a sibling Move package next to the implementation package. Make the spec package depend on the implementation package, and use `target` to reference implementation functions.
+
+```text
+workspace/
+├── project/
+│   ├── Move.toml
+│   └── sources/
+└── specs/
+    ├── Move.toml       # local dependency on ../project
+    └── sources/        # specification modules
+```
+
+When a spec needs private implementation state, add `#[test_only]` accessor functions to the implementation module and call those accessors from the spec package.
 
 ### Example: Verifying an LP Withdraw
 

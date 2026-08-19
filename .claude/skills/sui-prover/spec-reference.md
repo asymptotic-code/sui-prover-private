@@ -2,6 +2,10 @@
 
 Detailed reference for Move specification syntax used with the Sui Prover.
 
+## Package Layout
+
+Place specification modules in a sibling `specs/` Move package next to the implementation `project/` package. Make the spec package depend on the implementation package and use `target` to specify implementation functions. When specifications need private implementation state, expose it through `#[test_only]` accessor functions in the implementation module.
+
 ## Vector Iterator Functions
 
 Import with `use prover::vector_iter::*`:
@@ -250,13 +254,23 @@ fun safe_get(v: &vector<u64>, i: u64): u64 { ... }
 fun sqrt(x: u64): u64;  // No body, assumed correct
 ```
 
-### `#[spec_only(...)]` - Specification-Only Items
+### `#[test_only]` - Implementation Getters
 
-Similar to `test_only`, `spec_only` makes annotated code (modules, functions, structs, imports) only visible to the prover. The code will not appear under regular compilation or in test mode.
+Use `#[test_only]` for getter or accessor functions added to implementation modules. The prover can call test-only getters without including them in production builds:
+
+```move
+#[test_only]
+public fun get_field_name(value: &MyStruct): u64 {
+    value.field_name
+}
+```
+
+### `#[spec_only(...)]` - Specification Attributes
+
+Use parameterized `spec_only` attributes for axioms, datatype invariants, loop invariants, spec inclusion, and extra Boogie files.
 
 | Parameter | Description |
 |-----------|-------------|
-| (none) | Basic spec-only item |
 | `(axiom)` | Axiom definition |
 | `(inv_target = <TYPE>)` | Datatype invariant for specified type |
 | `(loop_inv(target = <FUNC>))` | External loop invariant |
@@ -266,9 +280,6 @@ Similar to `test_only`, `spec_only` makes annotated code (modules, functions, st
 
 Examples:
 ```move
-#[spec_only]
-fun helper_predicate(x: u64): bool { x > 0 }
-
 #[spec_only(axiom)]
 fun sqrt_axiom(x: u64): u64 { ... }
 
