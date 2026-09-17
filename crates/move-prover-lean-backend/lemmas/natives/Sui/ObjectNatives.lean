@@ -32,8 +32,10 @@ def delete_impl (_id : Address) : Unit :=
 def borrow_uid (tv0 : Type) [BEq tv0] [Inhabited tv0] (_obj : tv0) : UID :=
   default
 
--- record_new_uid is called during object creation to register a new UID
-def record_new_uid (_id : Address) : Unit :=
+-- record_new_uid_from_hash is called when a UID is created from a hash; it
+-- records the new UID and tracks the root version of `_parent` so the new UID
+-- inherits it.
+def record_new_uid_from_hash (_parent : Address) (_bytes : Address) : Unit :=
   ()
 
 end Object
