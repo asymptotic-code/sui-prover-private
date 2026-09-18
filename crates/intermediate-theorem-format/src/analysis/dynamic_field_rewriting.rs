@@ -109,7 +109,7 @@ fn lookup_df_entry<'a>(
 enum DynFieldOp {
     Add,            // dynamic_field::add -> TypedMap.set
     Remove,         // dynamic_field::remove -> TypedMap.erase
-    RemoveIfExists, // dynamic_field::remove_if_exists -> TypedMap.erase_if_exists
+    RemoveIfExists, // dynamic_field::remove_opt / remove_if_exists -> TypedMap.erase_if_exists
     Borrow,         // dynamic_field::borrow -> TypedMap.get
     BorrowMut,      // dynamic_field::borrow_mut -> handled pre-threading (skipped in post pass)
     Exists,         // dynamic_field::exists_with_type -> TypedMap.has
@@ -781,16 +781,18 @@ fn find_dynamic_field_functions(program: &Program) -> Vec<(FunctionID, DynFieldO
         let op = match func.name.as_str() {
             "add" => DynFieldOp::Add,
             "remove" => DynFieldOp::Remove,
-            "remove_if_exists" => DynFieldOp::RemoveIfExists,
+            // `remove_if_exists` is the deprecated name of `remove_opt`
+            "remove_opt" | "remove_if_exists" => DynFieldOp::RemoveIfExists,
             "borrow" => DynFieldOp::Borrow,
             "borrow_mut" => DynFieldOp::BorrowMut,
             // Both `exists_with_type<K, V>(uid, k)` and the type-erased
-            // `exists_<K>(uid, k)` map to `TypedMap.has`. The latter only
+            // `exists<K>(uid, k)` (deprecated name: `exists_`) map to
+            // `TypedMap.has`. The latter only
             // carries a key type-arg; lookup_df_entry's key-only fallback
             // resolves it against single-DF parents (and against multi-DF
             // parents whose only ghost field with this key happens to be
             // unique, which is the common case).
-            "exists_with_type" | "exists_" => DynFieldOp::Exists,
+            "exists_with_type" | "exists" | "exists_" => DynFieldOp::Exists,
             _ => continue,
         };
         result.push((func_id, op));
