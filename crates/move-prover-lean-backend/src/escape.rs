@@ -171,7 +171,24 @@ pub fn escape_identifier(name: &str) -> String {
         }
     }
 
-    match name.as_str() {
+    let escaped = escape_keyword(&name);
+    if escaped != name {
+        return escaped;
+    }
+    // Keep the escaping injective: a name that already looks like an escaped
+    // keyword gets one more underscore, so it cannot collide with the escaped
+    // keyword. E.g. Sui's `dynamic_field` has both `exists` (escaped to
+    // `exists_`) and its deprecated alias `exists_` (escaped to `exists__`).
+    let stem = name.trim_end_matches('_');
+    if stem.len() != name.len() && escape_keyword(stem) != stem {
+        return format!("{}_", name);
+    }
+    name
+}
+
+/// Escape a single identifier that is a Lean reserved word by appending `_`.
+fn escape_keyword(name: &str) -> String {
+    match name {
         // Basic control flow
         "if" => "if_".to_string(),
         "then" => "then_".to_string(),
@@ -259,6 +276,23 @@ pub fn escape_identifier(name: &str) -> String {
         "constant" => "constant_".to_string(),
         "initialize" => "initialize_".to_string(),
 
-        _ => name,
+        _ => name.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::escape_identifier;
+
+    #[test]
+    fn keyword_escaping_is_injective() {
+        assert_eq!(escape_identifier("exists"), "exists_");
+        assert_eq!(escape_identifier("exists_"), "exists__");
+        assert_eq!(escape_identifier("exists__"), "exists___");
+        assert_eq!(escape_identifier("exists.aborts"), "exists_.aborts");
+        assert_eq!(escape_identifier("exists_.aborts"), "exists__.aborts");
+        // names that merely end in `_` are left alone
+        assert_eq!(escape_identifier("remove_"), "remove_");
+        assert_eq!(escape_identifier("exists_with_type"), "exists_with_type");
     }
 }
