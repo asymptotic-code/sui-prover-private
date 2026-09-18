@@ -13,7 +13,7 @@
 /// real `<=` comparison, not a constant.
 module 0x42::pure_boogie_early_return_tail;
 
-#[spec_only]
+#[mode(spec), ext(spec_only)]
 use prover::prover::{ensures, requires};
 
 /// Early-return spelling -- the shape that regressed.
@@ -71,14 +71,14 @@ public fun sub_capped(x: u64, cap: u64): u64 {
 /// The catcher: `in_range(50, 10, 20)` is `50 <= 20 - 10`, i.e. false. A helper
 /// that collapsed to a constant `true` fails this `ensures` instead of
 /// satisfying it trivially.
-#[spec(prove)]
+#[mode(spec), ext(spec(prove))]
 fun test_in_range_false(): bool {
     let r = call_in_range(50, 10, 20);
     ensures(r == false);
     r
 }
 
-#[spec(prove)]
+#[mode(spec), ext(spec(prove))]
 fun test_in_range_true(): bool {
     let r = call_in_range(5, 10, 20);
     ensures(r == true);
@@ -86,7 +86,7 @@ fun test_in_range_true(): bool {
 }
 
 /// The early return itself still has to work.
-#[spec(prove)]
+#[mode(spec), ext(spec(prove))]
 fun test_in_range_early(): bool {
     let r = call_in_range(50, 0, 20);
     ensures(r == true);
@@ -94,7 +94,7 @@ fun test_in_range_early(): bool {
 }
 
 /// The control spelling must agree with the early-return one.
-#[spec(prove)]
+#[mode(spec), ext(spec(prove))]
 fun test_in_range_nested_false(): bool {
     let r = call_in_range_nested(50, 10, 20);
     ensures(r == false);
@@ -103,7 +103,7 @@ fun test_in_range_nested_false(): bool {
 
 /// `requires` position: without the real `x <= cap` constraint, `cap - x`
 /// underflows and this spec fails on an abort instead of verifying.
-#[spec(prove)]
+#[mode(spec), ext(spec(prove))]
 fun sub_capped_spec(x: u64, cap: u64): u64 {
     requires(fits(x, cap));
     let r = sub_capped(x, cap);

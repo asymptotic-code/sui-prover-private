@@ -5,7 +5,7 @@ public fun foo() {
 }
 
 // run_on is given a backend name; the error should point at the backend attribute
-#[spec(prove, run_on=b"lean")]
+#[mode(spec), ext(spec(prove, run_on=b"lean"))]
 public fun foo_spec_invalid() {
     foo();
 }

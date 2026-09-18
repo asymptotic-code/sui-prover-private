@@ -1,13 +1,13 @@
 module lean_demo::math;
 
-#[spec_only]
+#[mode(spec), ext(spec_only)]
 use prover::prover::{asserts, ensures, implies, requires};
 
 public fun max(a: u64, b: u64): u64 {
     if (a >= b) a else b
 }
 
-#[spec(prove)]
+#[mode(spec), ext(spec(prove))]
 fun max_spec(a: u64, b: u64): u64 {
     let result = max(a, b);
     ensures(result >= a);
@@ -26,7 +26,7 @@ public fun clamp(value: u64, low: u64, high: u64): u64 {
     }
 }
 
-#[spec(prove)]
+#[mode(spec), ext(spec(prove))]
 fun clamp_spec(value: u64, low: u64, high: u64): u64 {
     requires(low <= high);
     let result = clamp(value, low, high);
@@ -44,7 +44,7 @@ public fun distance(a: u64, b: u64): u64 {
     }
 }
 
-#[spec(prove)]
+#[mode(spec), ext(spec(prove))]
 fun distance_spec(a: u64, b: u64): u64 {
     let result = distance(a, b);
     ensures(result <= a || result <= b);
@@ -66,7 +66,7 @@ public fun withdraw(balance: &mut Balance, amount: u64): u64 {
     amount
 }
 
-#[spec(prove)]
+#[mode(spec), ext(spec(prove))]
 fun withdraw_spec(balance: &mut Balance, amount: u64): u64 {
     let balance_before = balance.value;
     asserts(amount <= balance_before);
@@ -82,7 +82,7 @@ public fun transfer(from: &mut Balance, to: &mut Balance, amount: u64) {
     to.value = to.value + withdrawn;
 }
 
-#[spec(prove)]
+#[mode(spec), ext(spec(prove))]
 fun transfer_spec(from: &mut Balance, to: &mut Balance, amount: u64) {
     let from_before = from.value;
     let to_before = to.value;

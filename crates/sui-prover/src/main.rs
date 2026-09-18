@@ -21,7 +21,7 @@ mod system_dependencies;
 #[derive(Parser)]
 #[clap(
     name = env!("CARGO_BIN_NAME"),
-    about = "Command-line tool for formal verification of Move code within Sui projects. When executed from the project's root directory, it attempts to prove all specifications annotated with #[spec(prove)]",
+    about = "Command-line tool for formal verification of Move code within Sui projects. When executed from the project's root directory, it attempts to prove all specifications annotated with #[mode(spec), ext(spec(prove))]",
     rename_all = "kebab-case",
     author,
     version = env!("CARGO_PKG_VERSION"),

@@ -1,6 +1,7 @@
 use move_compiler::{editions::Flavor, shared::known_attributes::ModeAttribute};
 use move_model::model::GlobalEnv;
 use move_package::BuildConfig as MoveBuildConfig;
+use move_stackless_bytecode::attr_query::SPEC_MODE;
 use move_stackless_bytecode::{
     package_targets::{PackageTargets, SpecBackend, VALID_RUN_ON_VALUES},
     target_filter::TargetFilterOptions,
@@ -41,7 +42,7 @@ backend_selection = "0x42"
 
     let mut config = MoveBuildConfig::default();
     config.default_flavor = Some(Flavor::Sui);
-    config.modes = vec![ModeAttribute::VERIFY_ONLY.into()];
+    config.modes = vec![ModeAttribute::VERIFY_ONLY.into(), SPEC_MODE.into()];
     config.skip_fetch_latest_git_deps = true;
     let model = move_model_for_package_legacy_unlocked(config, temp.path()).unwrap();
     assert!(!model.has_errors());
@@ -53,19 +54,16 @@ backend_selection = "0x42"
 
 const SPEC_BACKENDS_SOURCE: &str = r#"module backend_selection::example;
 
-#[spec(prove)]
+#[mode(spec), ext(spec(prove))]
 fun default_spec() {}
 
-#[ext(backend=b"both")]
-#[spec(prove)]
+#[mode(spec), ext(spec(prove), backend=b"both")]
 fun both_spec() {}
 
-#[ext(backend=b"lean")]
-#[spec(prove)]
+#[mode(spec), ext(spec(prove), backend=b"lean")]
 fun lean_spec() {}
 
-#[ext(backend=b"boogie")]
-#[spec(prove)]
+#[mode(spec), ext(spec(prove), backend=b"boogie")]
 fun boogie_spec() {}
 "#;
 

@@ -3,7 +3,7 @@
 /// function body restrictions.
 module 0x42::lean_owned_loop_unlabeled;
 
-#[spec_only]
+#[mode(spec), ext(spec_only)]
 use prover::prover::{requires, ensures};
 
 fun count_up(n: u64): u64 {
@@ -14,7 +14,7 @@ fun count_up(n: u64): u64 {
     i
 }
 
-#[spec_only, ext(pure)]
+#[mode(spec), ext(spec_only, pure)]
 fun counts_up_to(n: u64, bound: u64): bool {
     count_up(n) <= bound
 }
@@ -23,7 +23,7 @@ public fun double(x: u64): u64 {
     x * 2
 }
 
-#[spec(prove)]
+#[mode(spec), ext(spec(prove))]
 fun double_spec(x: u64): u64 {
     requires(counts_up_to(x, 100));
     requires(x <= 100);
