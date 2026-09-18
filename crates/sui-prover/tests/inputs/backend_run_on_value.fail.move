@@ -5,8 +5,7 @@ public fun foo() {
 }
 
 // backend is given a run location; the error should point at the run_on attribute
-#[ext(backend=b"local")]
-#[spec(prove)]
+#[mode(spec), ext(spec(prove), backend=b"local")]
 public fun foo_spec_invalid() {
     foo();
 }

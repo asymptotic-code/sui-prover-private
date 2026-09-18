@@ -5,8 +5,7 @@ public fun foo() {
 }
 
 // This spec has an invalid backend value and should produce an error
-#[ext(backend=b"z3")]
-#[spec(prove)]
+#[mode(spec), ext(spec(prove), backend=b"z3")]
 public fun foo_spec_invalid() {
     foo();
 }

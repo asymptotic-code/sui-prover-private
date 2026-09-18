@@ -4,7 +4,7 @@ expression: output
 ---
 exiting with bytecode transformation errors
 error: invalid backend value "z3". Valid values are: lean, boogie, both
-  ┌─ tests/inputs/backend_invalid.fail.move:8:7
+  ┌─ tests/inputs/backend_invalid.fail.move:8:32
   │
-8 │ #[ext(backend=b"z3")]
-  │       ^^^^^^^^^^^^^
+8 │ #[mode(spec), ext(spec(prove), backend=b"z3")]
+  │                                ^^^^^^^^^^^^^

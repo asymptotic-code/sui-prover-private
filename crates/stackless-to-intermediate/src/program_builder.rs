@@ -701,45 +701,24 @@ impl<'env> ProgramBuilder<'env> {
     }
 }
 
-/// Check if a function is a spec_only loop invariant (#[spec_only(loop_inv(...))]).
+/// Check if a function is a spec-only loop invariant
+/// (`#[mode(spec), ext(spec_only(loop_inv(...)))]` or the deprecated `#[spec_only(loop_inv(...))]`).
 /// These are logical assertions that may contain forall!/exists! and should return Prop.
 fn is_spec_only_loop_inv(func_env: &move_model::model::FunctionEnv) -> bool {
-    use move_compiler::shared::known_attributes::{
-        AttributeKind_, KnownAttribute, VerificationAttribute,
-    };
-    if let Some(attr) = func_env
-        .get_toplevel_attributes()
-        .get_(&AttributeKind_::SpecOnly)
-    {
-        if let KnownAttribute::Verification(VerificationAttribute::SpecOnly { loop_inv, .. }) =
-            &attr.value
-        {
-            return loop_inv.is_some();
-        }
-    }
-    false
+    loop_inv_target_name(func_env).is_some()
 }
 
-/// For a `#[spec_only(loop_inv(target=...))]` function, return the bare name of
+/// For a spec-only `loop_inv(target = ...)` function, return the bare name of
 /// the target function whose loop this invariant guards (the last `::` segment
 /// of the attribute's `target` ModuleAccess). `None` if the function carries no
 /// loop_inv attribute.
 fn loop_inv_target_name(func_env: &move_model::model::FunctionEnv) -> Option<String> {
-    use move_compiler::shared::known_attributes::{
-        AttributeKind_, KnownAttribute, VerificationAttribute,
-    };
-    let attr = func_env
-        .get_toplevel_attributes()
-        .get_(&AttributeKind_::SpecOnly)?;
-    if let KnownAttribute::Verification(VerificationAttribute::SpecOnly { loop_inv, .. }) =
-        &attr.value
-    {
-        let info = loop_inv.as_ref()?;
-        let full = info.target.to_string();
-        // ModuleAccess renders as `module::function` (or just `function`);
-        // the while-helper emitter keys off the bare target function name.
-        let bare = full.rsplit("::").next().unwrap_or(full.as_str());
-        return Some(bare.to_string());
-    }
-    None
+    let target = move_stackless_bytecode::attr_query::spec_only_loop_inv_target(
+        func_env.get_toplevel_attributes(),
+    )?;
+    let full = target.to_string();
+    // ModuleAccess renders as `module::function` (or just `function`);
+    // the while-helper emitter keys off the bare target function name.
+    let bare = full.rsplit("::").next().unwrap_or(full.as_str());
+    Some(bare.to_string())
 }

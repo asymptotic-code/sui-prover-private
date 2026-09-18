@@ -4,11 +4,11 @@ expression: output
 ---
 Verification successful
 warning: spec lean_pinned_summary::zero_or_one_spec calls lean_pinned_summary::is_zero, whose spec lean_pinned_summary::is_zero_spec is lean-owned; its summary is not available here
-   ┌─ tests/inputs/pure_functions/lean_pinned_summary.warn.move:26:1
+   ┌─ tests/inputs/pure_functions/lean_pinned_summary.warn.move:25:1
    │  
-26 │ ╭ fun zero_or_one_spec(x: u64): u64 {
-27 │ │     let result = zero_or_one(x);
-28 │ │     ensures(result <= 1);
-29 │ │     result
-30 │ │ }
+25 │ ╭ fun zero_or_one_spec(x: u64): u64 {
+26 │ │     let result = zero_or_one(x);
+27 │ │     ensures(result <= 1);
+28 │ │     result
+29 │ │ }
    │ ╰─^

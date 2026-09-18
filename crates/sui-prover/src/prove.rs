@@ -20,6 +20,7 @@ use move_model::model::GlobalEnv;
 use move_package::{BuildConfig as MoveBuildConfig, LintFlag};
 use move_prover_boogie_backend::boogie_backend::options::BoogieFileMode;
 use move_prover_boogie_backend::generator::run_boogie_gen;
+use move_stackless_bytecode::attr_query::SPEC_MODE;
 use move_stackless_bytecode::function_stats;
 use move_stackless_bytecode::package_targets::{PackageTargets, SpecBackend};
 use move_stackless_bytecode::target_filter::TargetFilterOptions;
@@ -30,7 +31,7 @@ use std::{
 
 impl From<BuildConfig> for MoveBuildConfig {
     fn from(config: BuildConfig) -> Self {
-        let mut modes = vec![ModeAttribute::VERIFY_ONLY.into()];
+        let mut modes = vec![ModeAttribute::VERIFY_ONLY.into(), SPEC_MODE.into()];
         if config.test {
             modes.push(ModeAttribute::TEST.into());
         }

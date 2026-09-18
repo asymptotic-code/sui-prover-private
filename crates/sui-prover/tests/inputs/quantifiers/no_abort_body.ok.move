@@ -11,19 +11,19 @@
 /// keeps `entry_within_cap` out of the pure-callee closure.
 module 0x42::quantifiers_no_abort_body;
 
-#[spec_only]
+#[mode(spec), ext(spec_only)]
 use prover::prover::{ensures, requires, forall};
 
 public struct Registry has copy, drop {
     cap: u64,
 }
 
-#[spec_only, ext(no_abort)]
+#[mode(spec), ext(spec_only, no_abort)]
 fun entry_within_cap(x: &u64, r: &Registry): bool {
     r.cap == 0 || *x <= r.cap
 }
 
-#[spec_only, ext(no_abort)]
+#[mode(spec), ext(spec_only, no_abort)]
 fun all_entries_within_cap(r: &Registry): bool {
     forall!<u64>(|x| entry_within_cap(x, r))
 }
@@ -32,7 +32,7 @@ public fun cap(r: &Registry): u64 {
     r.cap
 }
 
-#[spec(prove)]
+#[mode(spec), ext(spec(prove))]
 fun cap_spec(r: &Registry): u64 {
     requires(all_entries_within_cap(r));
     let result = cap(r);

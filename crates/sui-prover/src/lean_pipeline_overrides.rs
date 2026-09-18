@@ -165,23 +165,15 @@ impl FunctionTargetProcessor for LeanVerificationAnalysisProcessor {
     }
 }
 
-/// True for `#[spec_only(loop_inv(...))]` functions — the loop-invariant
+/// True for spec-only `loop_inv(...)` functions — the loop-invariant
 /// predicates the worker pipeline attaches to a target's loop. They are
 /// referenced only by attribute, so the verification reachability prune would
 /// drop them unless we mark them essential.
 fn is_spec_only_loop_inv(fun_env: &FunctionEnv) -> bool {
-    use move_compiler::shared::known_attributes::{KnownAttribute, VerificationAttribute};
-    if let Some(attr) = fun_env
-        .get_toplevel_attributes()
-        .get_(&AttributeKind_::SpecOnly)
-    {
-        if let KnownAttribute::Verification(VerificationAttribute::SpecOnly { loop_inv, .. }) =
-            &attr.value
-        {
-            return loop_inv.is_some();
-        }
-    }
-    false
+    move_stackless_bytecode::attr_query::spec_only_loop_inv_target(
+        fun_env.get_toplevel_attributes(),
+    )
+    .is_some()
 }
 
 pub struct LeanSpecInstrumentationProcessor {

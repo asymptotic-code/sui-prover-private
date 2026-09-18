@@ -1,6 +1,6 @@
 module backend_comparison::basic;
 
-#[spec_only]
+#[mode(spec), ext(spec_only)]
 use prover::prover::{asserts, ensures};
 use std::option;
 
@@ -19,8 +19,7 @@ public fun wrapped_value_is_some(value: u64): bool {
     option::some(value).is_some()
 }
 
-#[ext(backend=b"both")]
-#[spec(prove)]
+#[mode(spec), ext(spec(prove), backend=b"both")]
 fun max_spec(a: u64, b: u64): u64 {
     let result = max(a, b);
     ensures(result >= a);
@@ -29,7 +28,7 @@ fun max_spec(a: u64, b: u64): u64 {
     result
 }
 
-#[spec(prove)]
+#[mode(spec), ext(spec(prove))]
 fun increment_spec(value: u64): u64 {
     asserts(value < std::u64::max_value!());
     let result = increment(value);
@@ -38,7 +37,7 @@ fun increment_spec(value: u64): u64 {
     result
 }
 
-#[spec(prove)]
+#[mode(spec), ext(spec(prove))]
 fun wrapped_value_is_some_spec(value: u64): bool {
     let result = wrapped_value_is_some(value);
     ensures(result);

@@ -7,10 +7,10 @@
 /// would be a false `no_abort` foundation for everything quantified over it.
 module 0x42::early_return_abort_reach;
 
-#[spec_only]
+#[mode(spec), ext(spec_only)]
 use prover::prover::ensures;
 
-#[spec_only, ext(pure)]
+#[mode(spec), ext(spec_only, pure)]
 fun unguarded_sub_early(a: u64, b: u64): u64 {
     if (a == 0) {
         return 0
@@ -18,7 +18,7 @@ fun unguarded_sub_early(a: u64, b: u64): u64 {
     a - b
 }
 
-#[spec_only, ext(pure)]
+#[mode(spec), ext(spec_only, pure)]
 fun unguarded_sub_nested(a: u64, b: u64): u64 {
     if (a == 0) {
         0
@@ -31,7 +31,7 @@ public fun pick(a: u64, b: u64): u64 {
     if (a == 0) 0 else a - b
 }
 
-#[spec(prove)]
+#[mode(spec), ext(spec(prove))]
 fun pick_spec(a: u64, b: u64): u64 {
     let r = pick(a, b);
     ensures(r == unguarded_sub_early(a, b));

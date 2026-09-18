@@ -4,10 +4,10 @@
 /// spec names it.
 module 0x42::lean_owned_mut_ref;
 
-#[spec_only]
+#[mode(spec), ext(spec_only)]
 use prover::prover::{requires, ensures, val, drop};
 
-#[spec_only, ext(pure, backend=b"lean")]
+#[mode(spec), ext(spec_only, pure, backend=b"lean")]
 fun grows_by_one(v: &vector<u64>): bool {
     let old_len = v.length();
     let mut probe = val(v);
@@ -21,8 +21,7 @@ public fun first_or_zero(v: &vector<u64>): u64 {
     if (v.is_empty()) 0 else v[0]
 }
 
-#[ext(backend=b"lean")]
-#[spec(prove)]
+#[mode(spec), ext(spec(prove), backend=b"lean")]
 fun first_or_zero_spec(v: &vector<u64>): u64 {
     requires(grows_by_one(v));
     let result = first_or_zero(v);
@@ -34,7 +33,7 @@ public fun last_or_zero(v: &vector<u64>): u64 {
     if (v.is_empty()) 0 else v[v.length() - 1]
 }
 
-#[spec(prove)]
+#[mode(spec), ext(spec(prove))]
 fun last_or_zero_spec(v: &vector<u64>): u64 {
     let result = last_or_zero(v);
     ensures(result == if (v.is_empty()) 0 else v[v.length() - 1]);
