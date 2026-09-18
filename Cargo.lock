@@ -4404,7 +4404,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "sui-prover"
-version = "1.8.5"
+version = "1.8.6"
 dependencies = [
  "anyhow",
  "bcs",

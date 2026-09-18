@@ -221,7 +221,8 @@ fn collect_state_ops(program: &Program) -> HashMap<FunctionID, StateOp> {
             ("dynamic_field", "remove") => StateOp::DfRemove,
             ("dynamic_field", "borrow") => StateOp::DfBorrow,
             ("dynamic_field", "borrow_mut") => StateOp::DfBorrowMut,
-            ("dynamic_field", "exists_") => StateOp::DfExists,
+            // `exists_` is the deprecated name of `exists`
+            ("dynamic_field", "exists") | ("dynamic_field", "exists_") => StateOp::DfExists,
             ("dynamic_field", "exists_with_type") => StateOp::DfExistsWithType,
             ("transfer", "transfer") | ("transfer", "public_transfer") => StateOp::TransferOwned,
             ("transfer", "transfer_impl") => StateOp::TransferOwned,
