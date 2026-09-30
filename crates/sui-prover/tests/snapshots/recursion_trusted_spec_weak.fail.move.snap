@@ -1,0 +1,12 @@
+---
+source: crates/sui-prover/tests/integration.rs
+expression: output
+---
+exiting with verification errors
+error: prover::ensures does not hold
+   ┌─ tests/inputs/recursion_trusted_spec_weak.fail.move:28:5
+   │
+28 │     ensures(result == 2 * n);
+   │     ^^^^^^^^^^^^^^^^^^^^^^^^
+   │
+   =     at tests/inputs/recursion_trusted_spec_weak.fail.move:25: double_spec

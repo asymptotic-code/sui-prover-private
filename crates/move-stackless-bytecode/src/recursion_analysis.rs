@@ -1,10 +1,29 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 use crate::{
     function_target::FunctionData,
-    function_target_pipeline::{FunctionTargetProcessor, FunctionTargetsHolder},
+    function_target_pipeline::{FunctionTargetProcessor, FunctionTargetsHolder, FunctionVariant},
+    verification_analysis::VerificationInfo,
 };
 use codespan_reporting::diagnostic::Severity;
-use move_model::model::FunctionEnv;
+use itertools::Itertools;
+use move_model::model::{FunId, FunctionEnv, GlobalEnv, QualifiedId};
 
+/// Rejects recursion the backend cannot translate soundly.
+///
+/// Callees are inlined (`{:inline 1}`), so a cycle of inlined calls cannot be
+/// unrolled: past the bound Boogie assumes `false` and every path through the
+/// recursion would verify vacuously. A call whose callee has a usable,
+/// opaque spec is not inlined -- the caller gets the spec's contract -- so a
+/// cycle cut by such calls translates, provided each contract use is nested in
+/// the execution of the function it describes. Mutual spec reliance with no
+/// code recursion (issue-355: `foo_spec` assumes `bar_spec`, which assumes
+/// `foo_spec`) is circular and stays rejected.
+///
+/// A cutting spec is trusted, never proved: proving it would assume its own
+/// contract for the recursive calls, and with no termination check
+/// `f(n) = f(n)` would prove any postcondition. Its callers are proven
+/// against it as usual.
 pub struct RecursionAnalysisProcessor();
 
 impl RecursionAnalysisProcessor {
@@ -12,14 +31,134 @@ impl RecursionAnalysisProcessor {
         Box::new(Self())
     }
 
-    pub fn find_simple_recursion(&self, fun_env: &FunctionEnv) -> Vec<String> {
-        for qid in fun_env.get_called_functions() {
-            if qid == fun_env.get_qualified_id() {
-                return vec![fun_env.get_full_name_str(), fun_env.get_full_name_str()];
+    /// The spec whose contract replaces `caller`'s call to `callee`, if any.
+    fn contract_of(
+        targets: &FunctionTargetsHolder,
+        caller: &QualifiedId<FunId>,
+        callee: &QualifiedId<FunId>,
+    ) -> Option<QualifiedId<FunId>> {
+        targets
+            .get_callee_spec_qid(caller, callee)
+            .filter(|spec| !targets.omits_opaque(spec))
+            .copied()
+    }
+
+    fn reaches(
+        graph: &BTreeMap<QualifiedId<FunId>, BTreeSet<QualifiedId<FunId>>>,
+        from: QualifiedId<FunId>,
+        to: QualifiedId<FunId>,
+    ) -> bool {
+        let mut seen = BTreeSet::new();
+        let mut stack = vec![from];
+        while let Some(node) = stack.pop() {
+            if node == to {
+                return true;
+            }
+            if seen.insert(node) {
+                if let Some(next) = graph.get(&node) {
+                    stack.extend(next.iter().copied());
+                }
             }
         }
+        false
+    }
 
-        vec![]
+    fn has_cycle(graph: &BTreeMap<QualifiedId<FunId>, BTreeSet<QualifiedId<FunId>>>) -> bool {
+        graph.iter().any(|(node, next)| {
+            next.iter()
+                .any(|succ| succ == node || Self::reaches(graph, *succ, *node))
+        })
+    }
+
+    /// Whether the recursion among `members` is cut by opaque specs.
+    /// `members` are the component's functions this pass translates; `scc`
+    /// is the whole component, whose code calls decide whether a contract use
+    /// is nested (a caller outside `members` still carries the recursion).
+    fn is_cut_by_contracts(
+        env: &GlobalEnv,
+        targets: &FunctionTargetsHolder,
+        members: &BTreeSet<QualifiedId<FunId>>,
+        scc: &BTreeSet<QualifiedId<FunId>>,
+    ) -> bool {
+        let mut inlined: BTreeMap<_, BTreeSet<_>> = BTreeMap::new();
+        let mut code: BTreeMap<_, BTreeSet<_>> = BTreeMap::new();
+        for caller in scc {
+            if !targets.is_spec(caller) {
+                code.entry(*caller)
+                    .or_default()
+                    .extend(env.get_function(*caller).get_called_functions());
+            }
+        }
+        let mut contract_calls = vec![];
+        for caller in members {
+            for callee in env.get_function(*caller).get_called_functions() {
+                match Self::contract_of(targets, caller, &callee) {
+                    Some(spec) => {
+                        if members.contains(&callee) || members.contains(&spec) {
+                            contract_calls.push((*caller, callee));
+                        }
+                    }
+                    None => {
+                        if members.contains(&callee) {
+                            inlined.entry(*caller).or_default().insert(callee);
+                        }
+                    }
+                }
+            }
+        }
+        if Self::has_cycle(&inlined) {
+            return false;
+        }
+        contract_calls
+            .iter()
+            .all(|(caller, callee)| Self::reaches(&code, *callee, *caller))
+    }
+
+    /// Specs that cut the recursion and that this run also proves. Proving
+    /// one assumes its own contract for the recursive calls, with nothing
+    /// checking termination (`f(n) = f(n)` would prove any postcondition), so
+    /// a cutting spec may only be trusted, never proved here.
+    fn proved_cut_specs(
+        env: &GlobalEnv,
+        targets: &FunctionTargetsHolder,
+        members: &BTreeSet<QualifiedId<FunId>>,
+        scc: &BTreeSet<QualifiedId<FunId>>,
+    ) -> BTreeSet<QualifiedId<FunId>> {
+        members
+            .iter()
+            .flat_map(|caller| {
+                env.get_function(*caller)
+                    .get_called_functions()
+                    .into_iter()
+                    .filter_map(move |callee| {
+                        Self::contract_of(targets, caller, &callee)
+                            .filter(|spec| scc.contains(&callee) || scc.contains(spec))
+                    })
+            })
+            .filter(|spec| targets.is_proved_spec(spec))
+            .collect()
+    }
+
+    /// Whether this pass translates the function: verified or inlined. A
+    /// function kept only as `reachable` (for borrow analysis) never reaches
+    /// the backend, so its recursion cannot be unrolled anywhere.
+    fn translated(info: Option<&VerificationInfo>) -> bool {
+        info.map_or(false, |info| info.verified || info.inlined)
+    }
+
+    fn scc_members(
+        fun_env: &FunctionEnv,
+        scc_opt: Option<&[FunctionEnv]>,
+    ) -> Option<BTreeSet<QualifiedId<FunId>>> {
+        match scc_opt {
+            Some(scc) => Some(scc.iter().map(|f| f.get_qualified_id()).collect()),
+            // Direct self-recursion is a single node, which the SCC sort does
+            // not report as a component.
+            None => fun_env
+                .get_called_functions()
+                .contains(&fun_env.get_qualified_id())
+                .then(|| BTreeSet::from([fun_env.get_qualified_id()])),
+        }
     }
 }
 
@@ -31,24 +170,67 @@ impl FunctionTargetProcessor for RecursionAnalysisProcessor {
         data: FunctionData,
         scc_opt: Option<&[FunctionEnv]>,
     ) -> FunctionData {
-        let trace = if let Some(scc) = scc_opt {
-            scc.iter().map(|f| f.get_full_name_str()).collect()
-        } else {
-            // NOTE: also check for simple direct recursion (scc is not handling it)
-            self.find_simple_recursion(fun_env)
+        let Some(scc) = Self::scc_members(fun_env, scc_opt) else {
+            return data;
         };
-
-        if !trace.is_empty() {
-            fun_env.module_env.env.diag(
-                Severity::Error,
-                &fun_env.get_loc(),
-                &format!(
-                    "Recursive functions are not supported for specifications.\nPath: {}",
-                    trace.join(" -> ")
-                ),
-            );
+        if !Self::translated(data.annotations.get::<VerificationInfo>()) {
+            return data;
         }
-
+        let own = fun_env.get_qualified_id();
+        let members: BTreeSet<_> = scc
+            .iter()
+            .copied()
+            .filter(|qid| {
+                *qid == own
+                    || Self::translated(
+                        targets
+                            .get_data(qid, &FunctionVariant::Baseline)
+                            .and_then(|d| d.annotations.get::<VerificationInfo>()),
+                    )
+            })
+            .collect();
+        let env = fun_env.module_env.env;
+        if Self::is_cut_by_contracts(env, targets, &members, &scc) {
+            // Reported at the specs of the component only, once each, instead
+            // of at every member.
+            let mut proved = Self::proved_cut_specs(env, targets, &members, &scc);
+            if !proved.is_empty() && targets.is_spec(&own) {
+                if targets.is_proved_spec(&own) {
+                    proved.insert(own);
+                }
+                env.diag(
+                    Severity::Error,
+                    &fun_env.get_loc(),
+                    &format!(
+                        "Specs that cut a recursion cannot be proved: proving one assumes its \
+                         own contract for the recursive calls, and termination is not checked.\n\
+                         Specs: {}\n\
+                         Drop `prove` so the spec is trusted; its callers are still proven \
+                         against it.",
+                        proved
+                            .iter()
+                            .map(|spec| env.get_function(*spec).get_full_name_str())
+                            .join(", ")
+                    ),
+                );
+            }
+            return data;
+        }
+        let trace: Vec<String> = match scc_opt {
+            Some(scc) => scc.iter().map(|f| f.get_full_name_str()).collect(),
+            None => vec![fun_env.get_full_name_str(), fun_env.get_full_name_str()],
+        };
+        env.diag(
+            Severity::Error,
+            &fun_env.get_loc(),
+            &format!(
+                "Recursive functions are not supported for specifications.\nPath: {}\n\
+                 Cut the recursion with a trusted spec (no `prove`) for one of these \
+                 functions: its callers then use the spec's contract instead of inlining \
+                 the body.",
+                trace.join(" -> ")
+            ),
+        );
         data
     }
 
