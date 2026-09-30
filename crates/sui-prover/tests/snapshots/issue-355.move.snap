@@ -5,7 +5,7 @@ expression: output
 exiting with bytecode transformation errors
 error: Recursive functions are not supported for specifications.
 Path: foo::bar_spec -> foo::foo_spec
-Cut the recursion with a spec for one of these functions: its callers then use the spec's contract instead of inlining the body.
+Cut the recursion with a trusted spec (no `prove`) for one of these functions: its callers then use the spec's contract instead of inlining the body.
    ┌─ tests/inputs/issue-355.move:21:1
    │  
 21 │ ╭ fun bar_spec(x: u64): u64 {
@@ -17,7 +17,7 @@ Cut the recursion with a spec for one of these functions: its callers then use t
 
 error: Recursive functions are not supported for specifications.
 Path: foo::bar_spec -> foo::foo_spec
-Cut the recursion with a spec for one of these functions: its callers then use the spec's contract instead of inlining the body.
+Cut the recursion with a trusted spec (no `prove`) for one of these functions: its callers then use the spec's contract instead of inlining the body.
    ┌─ tests/inputs/issue-355.move:14:1
    │  
 14 │ ╭ fun foo_spec(x: u64): u64 {

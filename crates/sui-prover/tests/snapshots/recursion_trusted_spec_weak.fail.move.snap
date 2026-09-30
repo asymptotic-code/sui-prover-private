@@ -4,9 +4,9 @@ expression: output
 ---
 exiting with verification errors
 error: prover::ensures does not hold
-   ┌─ tests/inputs/recursion_cut_by_wrong_spec.fail.move:16:5
+   ┌─ tests/inputs/recursion_trusted_spec_weak.fail.move:28:5
    │
-16 │     ensures(result == n + 1);
+28 │     ensures(result == 2 * n);
    │     ^^^^^^^^^^^^^^^^^^^^^^^^
    │
-   =     at tests/inputs/recursion_cut_by_wrong_spec.fail.move:13: count_spec
+   =     at tests/inputs/recursion_trusted_spec_weak.fail.move:25: double_spec

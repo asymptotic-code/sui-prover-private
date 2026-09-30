@@ -3,9 +3,9 @@ module 0x42::foo;
 #[mode(spec), ext(spec_only)]
 use prover::prover::{requires, ensures};
 
-// Recursive, but every recursive call is replaced by the contract of
-// `count_spec`: the call graph has no inlined cycle, and the recursive use of
-// the contract is nested inside `count`'s own execution (induction).
+// Every recursive call is replaced by the contract of `count_spec`, but
+// `count_spec` is proved: proving it would assume itself for the recursive
+// call, so a spec that cuts a recursion must stay trusted.
 public fun count(n: u64): u64 {
     if (n == 0) { 0 } else { 1 + count(n - 1) }
 }

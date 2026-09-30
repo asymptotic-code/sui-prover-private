@@ -1,0 +1,17 @@
+---
+source: crates/sui-prover/tests/integration.rs
+expression: output
+---
+exiting with bytecode transformation errors
+error: Specs that cut a recursion cannot be proved: proving one assumes its own contract for the recursive calls, and termination is not checked.
+Specs: foo::count_spec
+Drop `prove` so the spec is trusted; its callers are still proven against it.
+   ┌─ tests/inputs/recursion_cut_by_spec.fail.move:18:1
+   │  
+18 │ ╭ public fun count_spec(n: u64): u64 {
+19 │ │     requires(n <= 1000);
+20 │ │     let result = count(n);
+21 │ │     ensures(result == n);
+22 │ │     result
+23 │ │ }
+   │ ╰─^

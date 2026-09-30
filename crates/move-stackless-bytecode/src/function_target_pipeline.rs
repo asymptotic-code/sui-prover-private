@@ -362,6 +362,12 @@ impl FunctionTargetsHolder {
         self.package_targets.scenario_specs().contains(id)
     }
 
+    /// Whether this run proves the spec (`prove` / `focus`, not skipped), in
+    /// any pass, as opposed to only assuming it.
+    pub fn is_proved_spec(&self, id: &QualifiedId<FunId>) -> bool {
+        self.package_targets.is_verified_spec(id)
+    }
+
     pub fn omits_opaque(&self, id: &QualifiedId<FunId>) -> bool {
         self.package_targets.omit_opaque_specs().contains(id)
     }
