@@ -1,0 +1,12 @@
+---
+source: crates/sui-prover/tests/integration.rs
+expression: output
+---
+exiting with verification errors
+error: prover::ensures does not hold
+   ┌─ tests/inputs/recursion_cut_by_wrong_spec.fail.move:16:5
+   │
+16 │     ensures(result == n + 1);
+   │     ^^^^^^^^^^^^^^^^^^^^^^^^
+   │
+   =     at tests/inputs/recursion_cut_by_wrong_spec.fail.move:13: count_spec

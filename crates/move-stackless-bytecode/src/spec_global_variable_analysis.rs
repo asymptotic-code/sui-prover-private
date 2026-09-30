@@ -252,7 +252,9 @@ pub fn collect_spec_global_variable_info(
                     "callee `{}` was filtered out",
                     fun_target.func_env.get_full_name_str()
                 ));
-            let info = get_info(data);
+            // Inside a recursive component a callee may not be analysed yet on
+            // the first round; the component's fixpoint loop revisits it.
+            let info = get_info_opt(data)?;
 
             match info.instantiate(type_inst) {
                 Ok(inst_info) => Some(inst_info),

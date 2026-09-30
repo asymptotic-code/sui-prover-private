@@ -7,14 +7,14 @@ use crate::{
     function_target::{FunctionData, FunctionTarget},
     function_target_pipeline::{FunctionTargetProcessor, FunctionTargetsHolder, FunctionVariant},
     reaching_def_analysis::{ReachingDefProcessor, ReachingDefState},
-    stackless_bytecode::{Bytecode, Operation},
+    stackless_bytecode::{AttrId, Bytecode, Operation},
     verification_analysis::get_info,
 };
 
 use codespan_reporting::diagnostic::{Diagnostic, Label, Severity};
 use itertools::Itertools;
 use move_model::{
-    model::{DatatypeId, FunctionEnv, GlobalEnv, QualifiedId, StructEnv},
+    model::{DatatypeId, FunId, FunctionEnv, GlobalEnv, Loc, QualifiedId, StructEnv},
     ty::Type,
 };
 use std::{
@@ -384,9 +384,11 @@ fn collect_dynamic_field_info(
                     return None;
                 }
 
+                // A callee in the same recursive component may not be analysed
+                // yet (or is this very function); the fixpoint loop revisits it.
                 let info = targets
                     .get_data(fun_id_with_info, &FunctionVariant::Baseline)
-                    .map(|data| get_fun_info(data))?;
+                    .and_then(|data| data.annotations.get::<DynamicFieldInfo>())?;
                 Some(info.instantiate(type_inst))
             }
             _ => None,
@@ -445,6 +447,18 @@ fn compute_uid_info_local(
     targets: &FunctionTargetsHolder,
     code: &[Bytecode],
 ) -> BTreeMap<usize, (usize, Type)> {
+    let mut visiting = BTreeSet::from([fun_target.func_env.get_qualified_id()]);
+    compute_uid_info_local_guarded(fun_target, targets, code, &mut visiting)
+}
+
+/// `visiting` holds the callee chain being walked: a recursive callee
+/// already on it contributes no mapping instead of being walked forever.
+fn compute_uid_info_local_guarded(
+    fun_target: &FunctionTarget,
+    targets: &FunctionTargetsHolder,
+    code: &[Bytecode],
+    visiting: &mut BTreeSet<QualifiedId<FunId>>,
+) -> BTreeMap<usize, (usize, Type)> {
     let env = fun_target.global_env();
     code.iter()
         .filter_map(|bc| match bc {
@@ -479,11 +493,20 @@ fn compute_uid_info_local(
                     return None;
                 }
 
+                if visiting.contains(&callee_id) {
+                    return None;
+                }
                 let callee_data = targets.get_data(&callee_id, &FunctionVariant::Baseline)?;
                 let callee_env = env.get_function(callee_id);
                 let callee_target = FunctionTarget::new(&callee_env, callee_data);
-                let callee_uid_info =
-                    compute_uid_info_local(&callee_target, targets, &callee_data.code);
+                visiting.insert(callee_id);
+                let callee_uid_info = compute_uid_info_local_guarded(
+                    &callee_target,
+                    targets,
+                    &callee_data.code,
+                    visiting,
+                );
+                visiting.remove(&callee_id);
 
                 for key in callee_uid_info.keys() {
                     if let Some(ret_pos) = get_function_return_local_pos(*key, &callee_data.code) {
@@ -557,6 +580,10 @@ fn compute_uid_info(
                     return None;
                 }
 
+                if callee_id == fun_target.func_env.get_qualified_id() {
+                    // Self-recursion: this function's own summary is being built.
+                    return None;
+                }
                 let callee_data = targets
                     .get_data(&callee_id, &FunctionVariant::Baseline)
                     .expect(&format!(
@@ -566,7 +593,7 @@ fn compute_uid_info(
                             .get_function(callee_id)
                             .get_full_name_str()
                     ));
-                let callee_mapping = &get_fun_info(callee_data).uid_info;
+                let callee_mapping = &callee_data.annotations.get::<DynamicFieldInfo>()?.uid_info;
 
                 for key in callee_mapping.keys() {
                     if let Some(ret_pos) = get_function_return_local_pos(*key, &callee_data.code) {
@@ -659,6 +686,39 @@ fn get_uid_object_type<'a>(
     })
 }
 
+/// A function body as it was before this pass rewrote it; see `process`.
+#[derive(Clone)]
+struct PreRewriteBody {
+    code: Vec<Bytecode>,
+    local_types: Vec<Type>,
+    locations: BTreeMap<AttrId, Loc>,
+    debug_comments: BTreeMap<AttrId, String>,
+    vc_infos: BTreeMap<AttrId, String>,
+    secondary_labels: BTreeMap<AttrId, (Loc, String)>,
+}
+
+impl PreRewriteBody {
+    fn capture(data: &FunctionData) -> Self {
+        Self {
+            code: data.code.clone(),
+            local_types: data.local_types.clone(),
+            locations: data.locations.clone(),
+            debug_comments: data.debug_comments.clone(),
+            vc_infos: data.vc_infos.clone(),
+            secondary_labels: data.secondary_labels.clone(),
+        }
+    }
+
+    fn restore(self, data: &mut FunctionData) {
+        data.code = self.code;
+        data.local_types = self.local_types;
+        data.locations = self.locations;
+        data.debug_comments = self.debug_comments;
+        data.vc_infos = self.vc_infos;
+        data.secondary_labels = self.secondary_labels;
+    }
+}
+
 pub struct DynamicFieldAnalysisProcessor {
     use_uid: Cell<bool>,
 }
@@ -748,6 +808,20 @@ impl FunctionTargetProcessor for DynamicFieldAnalysisProcessor {
         }
 
         let use_uid = self.use_uid.get();
+
+        // The pass rewrites dynamic-field calls (appends the object type,
+        // may add a temp). Inside a recursive component the pipeline repeats
+        // it until the summary is stable, so every round must start from the
+        // body it first saw, or it rewrites its own output forever.
+        if scc_opt.is_some() {
+            match data.annotations.get::<PreRewriteBody>() {
+                Some(saved) => saved.clone().restore(&mut data),
+                None => {
+                    let saved = PreRewriteBody::capture(&data);
+                    data.annotations.set(saved, true);
+                }
+            }
+        }
 
         let mut builder = FunctionDataBuilder::new(fun_env, data);
 

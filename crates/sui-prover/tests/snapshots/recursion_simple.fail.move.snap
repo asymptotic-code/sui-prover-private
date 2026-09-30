@@ -5,6 +5,7 @@ expression: output
 exiting with bytecode transformation errors
 error: Recursive functions are not supported for specifications.
 Path: recursion_simple_fail::factorial -> recursion_simple_fail::factorial
+Cut the recursion with a spec for one of these functions: its callers then use the spec's contract instead of inlining the body.
    ┌─ tests/inputs/recursion_simple.fail.move:6:1
    │  
  6 │ ╭ public fun factorial(x: u64): u64 {

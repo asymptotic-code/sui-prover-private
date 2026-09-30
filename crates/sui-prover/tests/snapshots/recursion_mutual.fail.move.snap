@@ -5,6 +5,7 @@ expression: output
 exiting with bytecode transformation errors
 error: Recursive functions are not supported for specifications.
 Path: recursion_mutual_fail::factorial_complex -> recursion_mutual_fail::factorial_helper
+Cut the recursion with a spec for one of these functions: its callers then use the spec's contract instead of inlining the body.
    ┌─ tests/inputs/recursion_mutual.fail.move:10:1
    │  
 10 │ ╭ public fun factorial_complex(x: u64): u64 {
@@ -18,6 +19,7 @@ Path: recursion_mutual_fail::factorial_complex -> recursion_mutual_fail::factori
 
 error: Recursive functions are not supported for specifications.
 Path: recursion_mutual_fail::factorial_complex -> recursion_mutual_fail::factorial_helper
+Cut the recursion with a spec for one of these functions: its callers then use the spec's contract instead of inlining the body.
   ┌─ tests/inputs/recursion_mutual.fail.move:6:1
   │  
 6 │ ╭ public fun factorial_helper(x: u64): u64 {

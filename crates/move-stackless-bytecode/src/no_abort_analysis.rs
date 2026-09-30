@@ -92,7 +92,7 @@ impl FunctionTargetProcessor for NoAbortAnalysisProcessor {
         targets: &mut FunctionTargetsHolder,
         fun_env: &FunctionEnv,
         mut data: FunctionData,
-        _scc_opt: Option<&[FunctionEnv]>,
+        scc_opt: Option<&[FunctionEnv]>,
     ) -> FunctionData {
         if data
             .annotations
@@ -122,11 +122,20 @@ impl FunctionTargetProcessor for NoAbortAnalysisProcessor {
                 }
             }
 
-            if !does_not_abort(
-                targets,
-                &fun_env.module_env.env.get_function(callee),
-                Some(&fun_env),
-            ) {
+            // A recursive callee (itself, or its component) has no settled
+            // answer while this function is being analysed; assuming it may
+            // abort only keeps the abort checks in place.
+            let recursive = callee == qualified_id
+                || scc_opt.map_or(false, |scc| {
+                    scc.iter().any(|f| f.get_qualified_id() == callee)
+                });
+            if recursive
+                || !does_not_abort(
+                    targets,
+                    &fun_env.module_env.env.get_function(callee),
+                    Some(&fun_env),
+                )
+            {
                 info.does_not_abort = false;
                 return data;
             }
