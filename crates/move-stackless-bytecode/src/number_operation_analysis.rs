@@ -584,6 +584,16 @@ impl TransferFunctions for NumberOperationAnalysis<'_> {
                         }
                     }
                     GetField(msid, sid, _, offset) | BorrowField(msid, sid, _, offset) => {
+                        // The struct may be declared in another module than the
+                        // function (e.g. type invariant instrumentation reads fields of
+                        // foreign structs), so resolve it via `msid`.
+                        let field_id = self
+                            .func_target
+                            .global_env()
+                            .get_module(*msid)
+                            .into_struct(*sid)
+                            .get_field_by_offset(*offset)
+                            .get_id();
                         let dests_oper = global_state
                             .get_temp_index_oper(cur_mid, cur_fid, dests[0], baseline_flag)
                             .unwrap();
@@ -591,15 +601,7 @@ impl TransferFunctions for NumberOperationAnalysis<'_> {
                             .struct_operation_map
                             .get(&(*msid, *sid))
                             .unwrap()
-                            .get(
-                                &self
-                                    .func_target
-                                    .func_env
-                                    .module_env
-                                    .get_struct(*sid)
-                                    .get_field_by_offset(*offset)
-                                    .get_id(),
-                            )
+                            .get(&field_id)
                             .unwrap();
 
                         if self.check_conflict(dests_oper, field_oper) {
@@ -620,15 +622,7 @@ impl TransferFunctions for NumberOperationAnalysis<'_> {
                                 .struct_operation_map
                                 .get_mut(&(*msid, *sid))
                                 .unwrap()
-                                .insert(
-                                    self.func_target
-                                        .func_env
-                                        .module_env
-                                        .get_struct(*sid)
-                                        .get_field_by_offset(*offset)
-                                        .get_id(),
-                                    merged_oper,
-                                );
+                                .insert(field_id, merged_oper);
                         }
                     }
                     Function(msid, fsid, _) => {
