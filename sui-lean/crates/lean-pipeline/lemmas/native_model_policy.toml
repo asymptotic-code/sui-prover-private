@@ -1,0 +1,73 @@
+version = 1
+
+[[rule]]
+package = "Sui"
+module = "accumulator"
+function = "emit_deposit_event"
+source = "handwritten"
+classification = "trusted"
+justification = "Accumulator events are not user events. The VM native (sui-execution/latest/sui-move-natives/src/accumulator.rs) forwards to ObjectRuntime::emit_accumulator_event, which pushes onto state.accumulator_events and the accumulator merge/split totals and never touches state.events -- the vector take_user_events returns and test_scenario counts into num_user_events. So, unlike event::emit, this native must NOT bump the World's tx_user_events, and the identity model is the faithful one. test_scenario::end_transaction discards accumulator_events outright, and no object, dynamic-field, bag or funds_accumulator ledger state moves, so nothing else the World represents changes either. Residual disclosed gap: emit_accumulator_event can raise ARITHMETIC_ERROR when a key's cumulative merges overflow u64 inside one transaction and the model has no .aborts companion -- the same unmodeled-abort shape event::emit already carries here (max_num_event_emit), and unreachable today because the native is public(package) in sui::accumulator with no caller anywhere in the framework."
+
+[[rule]]
+package = "Sui"
+module = "accumulator"
+function = "emit_withdraw_event"
+source = "handwritten"
+classification = "trusted"
+justification = "Accumulator events are not user events. The VM native (sui-execution/latest/sui-move-natives/src/accumulator.rs) forwards to ObjectRuntime::emit_accumulator_event, which pushes onto state.accumulator_events and the accumulator merge/split totals and never touches state.events -- the vector take_user_events returns and test_scenario counts into num_user_events. So, unlike event::emit, this native must NOT bump the World's tx_user_events, and the identity model is the faithful one. test_scenario::end_transaction discards accumulator_events outright, and no object, dynamic-field, bag or funds_accumulator ledger state moves, so nothing else the World represents changes either. Residual disclosed gap: emit_accumulator_event can raise ARITHMETIC_ERROR when a key's cumulative splits overflow u64 inside one transaction and the model has no .aborts companion -- the same unmodeled-abort shape event::emit already carries here (max_num_event_emit), and unreachable today because the native is public(package) in sui::accumulator with no caller anywhere in the framework."
+
+[[rule]]
+package = "Sui"
+module = "test_utils"
+function = "create_one_time_witness"
+source = "handwritten"
+classification = "test_only"
+justification = "The test helper constructs the type's explicit Inhabited value rather than modeling VM one-time-witness validation."
+
+[[rule]]
+package = "Sui"
+module = "test_scenario"
+function = "*"
+source = "handwritten"
+classification = "test_only"
+justification = "Sui test_scenario models are executable test harness semantics, not proof models."
+
+[[rule]]
+package = "MoveStdlib"
+module = "unit_test"
+function = "*"
+source = "handwritten"
+classification = "test_only"
+justification = "Move unit_test models are executable test harness semantics, not proof models."
+
+[[rule]]
+package = "Sui"
+module = "vec_set"
+function = "*"
+source = "handwritten"
+classification = "trusted"
+justification = "VecSet is modeled as a structural record over List, which admits duplicate elements the API cannot produce. Uniqueness is enforced off-model by the defining module (insert aborts on a present key, from_keys aborts on duplicates) plus Move field encapsulation: contents is private, so only sui::vec_set can construct or mutate a VecSet. The model names that invariant as Vec_set.Inv and proves establishment and preservation for every writer; Inv is supplied as a hypothesis, never assumed as an axiom. See plans/lean-pipeline/container-datatype-invariants.md."
+
+[[rule]]
+package = "Sui"
+module = "vec_map"
+function = "*"
+source = "handwritten"
+classification = "trusted"
+justification = "VecMap is modeled as a structural record over a list of entries, which admits duplicate keys the API cannot produce. Uniqueness is enforced off-model by the defining module (insert upserts, remove deletes the single entry at get_idx) plus Move field encapsulation: contents is private, so only sui::vec_map can construct or mutate a VecMap. The model names that invariant as Vec_map.Inv and proves establishment and preservation for every writer; Inv is supplied as a hypothesis, never assumed as an axiom. See plans/lean-pipeline/container-datatype-invariants.md."
+
+[[rule]]
+package = "Sui"
+module = "*"
+function = "*"
+source = "handwritten"
+classification = "trusted"
+justification = "Migration classification for the shipped Sui Lean native model library."
+
+[[rule]]
+package = "MoveStdlib"
+module = "*"
+function = "*"
+source = "handwritten"
+classification = "trusted"
+justification = "Migration classification for the shipped MoveStdlib Lean native model library."

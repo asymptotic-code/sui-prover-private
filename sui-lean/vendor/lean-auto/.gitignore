@@ -1,0 +1,5 @@
+/build
+/lake-packages/*
+/.zeport_ignore
+/lakefile.olean
+/.lake
