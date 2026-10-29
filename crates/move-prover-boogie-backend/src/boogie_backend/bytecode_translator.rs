@@ -1501,6 +1501,20 @@ impl<'env> StructTranslator<'env> {
             .dynamic_field_names_values(&struct_type)
             .collect_vec();
 
+        // Untyped occupancy also covers values whose types are absent from this program.
+        let occupancy_names = dynamic_field_info
+            .dynamic_field_names(&struct_type)
+            .collect_vec();
+        let occupancy_selectors = occupancy_names
+            .iter()
+            .map(|name| {
+                format!(
+                    "$dynamic_field_occupancy{}",
+                    boogie_inst_suffix(env, &[(*name).clone()])
+                )
+            })
+            .collect_vec();
+
         // Emit data type
         let struct_name = boogie_struct_name(struct_env, self.type_inst);
         emitln!(writer, "datatype {} {{", struct_name);
@@ -1530,7 +1544,13 @@ impl<'env> StructTranslator<'env> {
                 value_type,
             )
         });
-        let all_fields = fields.chain(dynamic_fields).join(", ");
+        let occupancy_fields = occupancy_selectors
+            .iter()
+            .map(|sel| format!("{}: (Table int bool)", sel));
+        let all_fields = fields
+            .chain(dynamic_fields)
+            .chain(occupancy_fields)
+            .join(", ");
         emitln!(writer, "    {}({})", struct_name, all_fields);
         emitln!(writer, "}");
 
@@ -1568,7 +1588,10 @@ impl<'env> StructTranslator<'env> {
                                 boogie_dynamic_field_sel(self.parent.env, name, value)
                             )
                         });
-                    let all_args = args.chain(dynamic_field_args).join(", ");
+                    let all_args = args
+                        .chain(dynamic_field_args)
+                        .chain(occupancy_selectors.iter().map(|sel| format!("s->{}", sel)))
+                        .join(", ");
                     emitln!(writer, "{}({})", struct_name, all_args);
                 },
             );
@@ -1606,8 +1629,45 @@ impl<'env> StructTranslator<'env> {
                                     )
                                 }
                             });
-                    let all_args = args.chain(dynamic_field_args).join(", ");
+                    let all_args = args
+                        .chain(dynamic_field_args)
+                        .chain(occupancy_selectors.iter().map(|sel| format!("s->{}", sel)))
+                        .join(", ");
                     emitln!(writer, "{}({})", struct_name, all_args);
+                },
+            );
+        }
+
+        for (pos, selector) in occupancy_selectors.iter().enumerate() {
+            self.emit_function(
+                &format!(
+                    "$Update'{}'_{}(s: {}, x: (Table int bool)): {}",
+                    suffix,
+                    &selector[1..],
+                    struct_name,
+                    struct_name
+                ),
+                || {
+                    let args = fields
+                        .iter()
+                        .map(|f| format!("s->{}", boogie_field_sel(f, self.type_inst)));
+                    let dynamic_args = dynamic_field_names_values.iter().map(|(name, value)| {
+                        format!("s->{}", boogie_dynamic_field_sel(env, name, value))
+                    });
+                    let occupancy_args =
+                        occupancy_selectors.iter().enumerate().map(|(index, sel)| {
+                            if index == pos {
+                                "x".to_string()
+                            } else {
+                                format!("s->{}", sel)
+                            }
+                        });
+                    emitln!(
+                        writer,
+                        "{}({})",
+                        struct_name,
+                        args.chain(dynamic_args).chain(occupancy_args).join(", ")
+                    );
                 },
             );
         }
@@ -1638,6 +1698,24 @@ impl<'env> StructTranslator<'env> {
                                 boogie_well_formed_expr_bv(env, &sel, ty, bv_flag)
                             );
                             sep = "  && ";
+                        }
+                        // Only valid states couple typed payload tables to occupancy. These
+                        // constraints must not be universal datatype axioms: arbitrary table
+                        // combinations exist, including during the two-step native updates.
+                        for (name, value) in &dynamic_field_names_values {
+                            let typed = boogie_dynamic_field_sel(env, name, value);
+                            let occupied = format!("$dynamic_field_occupancy{}", boogie_inst_suffix(env, &[(*name).clone()]));
+                            emitln!(writer, "{}(forall key: int :: ContainsTable(s->{}, key) ==> ContainsTable(s->{}, key))", sep, typed, occupied);
+                            sep = "  && ";
+                        }
+                        for (index, (name, value)) in dynamic_field_names_values.iter().enumerate() {
+                            for (other_name, other_value) in dynamic_field_names_values.iter().skip(index + 1) {
+                                // Open types may alias after instantiation.
+                                if name == other_name && !value.is_open() && !other_value.is_open() {
+                                    emitln!(writer, "{}(forall key: int :: !(ContainsTable(s->{}, key) && ContainsTable(s->{}, key)))", sep, boogie_dynamic_field_sel(env, name, value), boogie_dynamic_field_sel(env, other_name, other_value));
+                                    sep = "  && ";
+                                }
+                            }
                         }
                         if let Some(vec_set_qid) = self.parent.env.vec_set_qid() {
                             if struct_env.get_qualified_id() == vec_set_qid {
@@ -3294,7 +3372,14 @@ impl<'env> FunctionTranslator<'env> {
                                 .collect_vec();
 
                             // Combine all arguments
-                            let all_args = regular_args.into_iter().chain(dynamic_args).join(", ");
+                            let occupancy_args = dynamic_field_info
+                                .dynamic_field_names(&struct_type)
+                                .map(|_| "EmptyTable()".to_string());
+                            let all_args = regular_args
+                                .into_iter()
+                                .chain(dynamic_args)
+                                .chain(occupancy_args)
+                                .join(", ");
 
                             format!("{}({})", boogie_struct_name(&struct_env, inst), all_args)
                         } else if let Operation::PackVariant(mid, eid, vid, inst) = op {
@@ -4956,7 +5041,14 @@ impl<'env> FunctionTranslator<'env> {
                             .collect_vec();
 
                         // Combine all arguments
-                        let all_args = regular_args.into_iter().chain(dynamic_args).join(", ");
+                        let occupancy_args = dynamic_field_info
+                            .dynamic_field_names(&struct_type)
+                            .map(|_| "EmptyTable()".to_string());
+                        let all_args = regular_args
+                            .into_iter()
+                            .chain(dynamic_args)
+                            .chain(occupancy_args)
+                            .join(", ");
 
                         let dest_str = str_local(dests[0]);
                         emitln!(

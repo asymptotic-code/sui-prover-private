@@ -1,0 +1,114 @@
+---
+source: crates/sui-prover/tests/integration.rs
+expression: output
+---
+exiting with verification errors
+warning: UID object type not found, dynamic fields will be placed under UID
+   ┌─ tests/inputs/dynamic_field/occupancy_false.fail.move:40:18
+   │
+40 │     let before = df::exists<u64>(&uid, 7);
+   │                  ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: UID object type not found, dynamic fields will be placed under UID
+   ┌─ tests/inputs/dynamic_field/occupancy_false.fail.move:41:5
+   │
+41 │     df::add(&mut uid, 7u64, true);
+   │     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: UID object type not found, dynamic fields will be placed under UID
+   ┌─ tests/inputs/dynamic_field/occupancy_false.fail.move:42:19
+   │
+42 │     let removed = df::remove<u64, bool>(&mut uid, 7);
+   │                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: UID object type not found, dynamic fields will be placed under UID
+   ┌─ tests/inputs/dynamic_field/occupancy_false.fail.move:43:17
+   │
+43 │     let after = df::exists<u64>(&uid, 7);
+   │                 ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: UID object type not found, dynamic fields will be placed under UID
+  ┌─ tests/inputs/dynamic_field/occupancy_false.fail.move:7:5
+  │
+7 │     df::add(uid, key, value);
+  │     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: UID object type not found, dynamic fields will be placed under UID
+   ┌─ tests/inputs/dynamic_field/occupancy_false.fail.move:12:14
+   │
+12 │     asserts(!df::exists<u64>(uid, key));
+   │              ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: UID object type not found, dynamic fields will be placed under UID
+   ┌─ tests/inputs/dynamic_field/occupancy_false.fail.move:14:13
+   │
+14 │     ensures(df::exists<u64>(uid, key));
+   │             ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: UID object type not found, dynamic fields will be placed under UID
+   ┌─ tests/inputs/dynamic_field/occupancy_false.fail.move:15:13
+   │
+15 │     ensures(df::exists_with_type<u64, u64>(uid, key));
+   │             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: UID object type not found, dynamic fields will be placed under UID
+   ┌─ tests/inputs/dynamic_field/occupancy_false.fail.move:16:14
+   │
+16 │     ensures(*df::borrow<u64, u64>(uid, key) == value);
+   │              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: UID object type not found, dynamic fields will be placed under UID
+   ┌─ tests/inputs/dynamic_field/occupancy_false.fail.move:20:20
+   │
+20 │     let previous = df::remove<u64, u64>(uid, key);
+   │                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: UID object type not found, dynamic fields will be placed under UID
+   ┌─ tests/inputs/dynamic_field/occupancy_false.fail.move:21:5
+   │
+21 │     df::add(uid, key, value);
+   │     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: UID object type not found, dynamic fields will be placed under UID
+   ┌─ tests/inputs/dynamic_field/occupancy_false.fail.move:27:13
+   │
+27 │     asserts(df::exists_with_type<u64, u64>(uid, key));
+   │             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: UID object type not found, dynamic fields will be placed under UID
+   ┌─ tests/inputs/dynamic_field/occupancy_false.fail.move:28:21
+   │
+28 │     let previous = *df::borrow<u64, u64>(uid, key);
+   │                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: UID object type not found, dynamic fields will be placed under UID
+   ┌─ tests/inputs/dynamic_field/occupancy_false.fail.move:31:13
+   │
+31 │     ensures(df::exists<u64>(uid, key));
+   │             ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: UID object type not found, dynamic fields will be placed under UID
+   ┌─ tests/inputs/dynamic_field/occupancy_false.fail.move:32:14
+   │
+32 │     ensures(!df::exists_with_type<u64, u64>(uid, key));
+   │              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: UID object type not found, dynamic fields will be placed under UID
+   ┌─ tests/inputs/dynamic_field/occupancy_false.fail.move:33:13
+   │
+33 │     ensures(df::exists_with_type<u64, bool>(uid, key));
+   │             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: UID object type not found, dynamic fields will be placed under UID
+   ┌─ tests/inputs/dynamic_field/occupancy_false.fail.move:34:14
+   │
+34 │     ensures(*df::borrow<u64, bool>(uid, key) == value);
+   │              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: prover::ensures does not hold
+   ┌─ tests/inputs/dynamic_field/occupancy_false.fail.move:51:5
+   │
+51 │     ensures(!result);
+   │     ^^^^^^^^^^^^^^^^
+   │
+   =     at tests/inputs/dynamic_field/occupancy_false.fail.move:49: fresh_spec

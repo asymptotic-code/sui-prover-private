@@ -13,7 +13,7 @@ fun store_list(x: &mut Foo, key: u64, items: vector<u64>) {
 
 #[mode(spec), ext(spec(prove))]
 fun store_list_spec(x: &mut Foo, key: u64, items: vector<u64>) {
-    requires(!df::exists_with_type<u64, vector<u64>>(&x.id, key));
+    requires(!df::exists<u64>(&x.id, key));
     store_list(x, key, items);
     ensures(df::exists_with_type<u64, vector<u64>>(&x.id, key));
     ensures(*df::borrow<u64, vector<u64>>(&x.id, key) == items);

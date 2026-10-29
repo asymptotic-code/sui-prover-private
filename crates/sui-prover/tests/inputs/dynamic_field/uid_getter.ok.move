@@ -48,9 +48,9 @@ fun test_spec(market: &mut Market) {
     let fee_value = 50;
     let extra_value = 25;
 
-    requires(!df::exists_with_type<SupplyLimitKey, u64>(&market.id, SupplyLimitKey {}));
-    requires(!df::exists_with_type<BorrowFeeKey, u64>(uid(market), BorrowFeeKey {}));
-    requires(!df::exists_with_type<ExtraKey, u64>(&market.id, ExtraKey {}));
+    requires(!df::exists<SupplyLimitKey>(&market.id, SupplyLimitKey {}));
+    requires(!df::exists<BorrowFeeKey>(uid(market), BorrowFeeKey {}));
+    requires(!df::exists<ExtraKey>(&market.id, ExtraKey {}));
     
     // Test all three UID getter patterns:
     test_add_with_uid_getter_var(market, fee_value);         // uid_mut stored in variable

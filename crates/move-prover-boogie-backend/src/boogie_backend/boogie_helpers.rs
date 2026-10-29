@@ -217,6 +217,16 @@ pub fn boogie_default_value(env: &GlobalEnv, ty: &Type) -> String {
                 let field_defaults = struct_env
                     .get_fields()
                     .map(|f| boogie_default_value(env, &f.get_type().instantiate(inst)))
+                    .chain(
+                        move_stackless_bytecode::dynamic_field_analysis::get_env_info(env)
+                            .dynamic_field_names_values(ty)
+                            .map(|_| "EmptyTable()".to_string()),
+                    )
+                    .chain(
+                        move_stackless_bytecode::dynamic_field_analysis::get_env_info(env)
+                            .dynamic_field_names(ty)
+                            .map(|_| "EmptyTable()".to_string()),
+                    )
                     .collect::<Vec<_>>()
                     .join(", ");
                 if field_defaults.is_empty() {

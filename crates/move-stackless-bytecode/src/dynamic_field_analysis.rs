@@ -108,6 +108,14 @@ impl DynamicFieldInfo {
             .unique()
     }
 
+    pub fn dynamic_field_names(&self, ty: &Type) -> impl Iterator<Item = &Type> + '_ {
+        self.dynamic_field_mappings
+            .get(ty)
+            .into_iter()
+            .flat_map(|entries| entries.iter().map(NameValueInfo::name))
+            .unique()
+    }
+
     /// union two DynamicFieldTypeInfo
     pub fn union(&self, other: &Self) -> Self {
         let mut new_info = self.clone();

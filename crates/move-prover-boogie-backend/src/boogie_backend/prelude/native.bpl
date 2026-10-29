@@ -997,6 +997,7 @@ procedure {:inline 2} {{impl.fun_drop}}{{S}}(t: {{Type}}{{S}}) {}
 {%- set SV = "'" ~ instance.1.suffix ~ "'" -%}
 {%- set DF_S = "'" ~ instance.0.suffix ~ "_" ~ instance.1.suffix ~ "_" ~ impl.struct_name ~ "'" -%}
 {%- set ENC = "$EncodeKey'" ~ instance.0.suffix ~ "'" -%}
+{%- set OCC = "dynamic_field_occupancy'" ~ instance.0.suffix ~ "'" -%}
 
 {%- if impl.fun_add != "" %}
 procedure {:inline 2} {{impl.fun_add}}{{DF_S}}(m: $Mutation ({{Type}}), k: {{K}}, v: {{V}}) returns (m': $Mutation({{Type}})) {
@@ -1004,10 +1005,11 @@ procedure {:inline 2} {{impl.fun_add}}{{DF_S}}(m: $Mutation ({{Type}}), k: {{K}}
     var t: {{Type}};
     enc_k := {{ENC}}(k);
     t := $Dereference(m);
-    if (ContainsTable(t->$dynamic_fields{{S}}, enc_k)) {
+    if (ContainsTable(t->${{OCC}}, enc_k)) {
         call $Abort($StdError(7/*INVALID_ARGUMENTS*/, 100/*EALREADY_EXISTS*/));
     } else {
-        m' := $UpdateMutation(m, $Update'{{Type}}'_dynamic_fields{{S}}(t, AddTable(t->$dynamic_fields{{S}}, enc_k, v)));
+        t := $Update'{{Type}}'_dynamic_fields{{S}}(t, AddTable(t->$dynamic_fields{{S}}, enc_k, v));
+        m' := $UpdateMutation(m, $Update'{{Type}}'_{{OCC}}(t, AddTable(t->${{OCC}}, enc_k, true)));
     }
 }
 {%- endif %}
@@ -1069,7 +1071,8 @@ procedure {:inline 2} {{impl.fun_remove}}{{DF_S}}(m: $Mutation ({{Type}}), k: {{
     } else {
         v := GetTable(t->$dynamic_fields{{S}}, enc_k);
         assume $IsValid{{SV}}(v);
-        m' := $UpdateMutation(m, $Update'{{Type}}'_dynamic_fields{{S}}(t, RemoveTable(t->$dynamic_fields{{S}}, enc_k)));
+        t := $Update'{{Type}}'_dynamic_fields{{S}}(t, RemoveTable(t->$dynamic_fields{{S}}, enc_k));
+        m' := $UpdateMutation(m, $Update'{{Type}}'_{{OCC}}(t, RemoveTable(t->${{OCC}}, enc_k)));
     }
 }
 {%- endif %}
@@ -1085,7 +1088,8 @@ procedure {:inline 2} {{fun_remove_opt}}{{DF_S}}(m: $Mutation ({{Type}}), k: {{K
     if (ContainsTable(t->$dynamic_fields{{S}}, enc_k)) {
         val := GetTable(t->$dynamic_fields{{S}}, enc_k);
         assume $IsValid{{SV}}(val);
-        m' := $UpdateMutation(m, $Update'{{Type}}'_dynamic_fields{{S}}(t, RemoveTable(t->$dynamic_fields{{S}}, enc_k)));
+        t := $Update'{{Type}}'_dynamic_fields{{S}}(t, RemoveTable(t->$dynamic_fields{{S}}, enc_k));
+        m' := $UpdateMutation(m, $Update'{{Type}}'_{{OCC}}(t, RemoveTable(t->${{OCC}}, enc_k)));
         v := $1_option_Option{{SV}}(MakeVec1(val));
     } else {
         m' := m;
@@ -1100,10 +1104,6 @@ function {:inline} {{impl.fun_exists_with_type}}{{DF_S}}(t: ({{Type}}), k: {{K}}
 }
 {%- endif %}
 
-{%- if impl.fun_exists_inner != "" %}
-axiom (forall t: {{Type}}, k: {{K}} :: {({{impl.fun_exists_inner}}{{SK}}(t, k))}
-   ContainsTable(t->$dynamic_fields{{S}}, {{ENC}}(k)) ==> {{impl.fun_exists_inner}}{{SK}}(t, k));
-{%- endif %}
 
 {% endmacro dynamic_field_module %}
 
@@ -1627,7 +1627,9 @@ axiom (forall {{QP}}, a: int, b: int ::
 {%- set DF_S = "'" ~ instance.suffix ~ "_" ~ impl.struct_name ~ "'" -%}
 
 {%- if impl.fun_exists_inner != "" %}
-function {{impl.fun_exists_inner}}{{DF_S}}(t: ({{Type}}), k: {{T}}): bool;
+function {:inline} {{impl.fun_exists_inner}}{{DF_S}}(t: ({{Type}}), k: {{T}}): bool {
+    ContainsTable(t->$dynamic_field_occupancy{{S}}, $EncodeKey{{S}}(k))
+}
 {%- endif %}
 
 {%- for fun_exists in impl.fun_exists %}
