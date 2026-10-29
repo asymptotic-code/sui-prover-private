@@ -9,6 +9,8 @@ use sui::object::ID;
 
 public struct SpecTransferAddress {}
 public struct SpecTransferAddressExists {}
+public struct SpecShareAddress {}
+public struct SpecShareAddressExists {}
 
 #[mode(spec), ext(spec(target = sui::transfer::freeze_object_impl))]
 fun freeze_object_impl_spec<T: key>(obj: T) {
@@ -17,7 +19,12 @@ fun freeze_object_impl_spec<T: key>(obj: T) {
 
 #[mode(spec), ext(spec(target = sui::transfer::share_object_impl))]
 fun share_object_impl_spec<T: key>(obj: T) {
-    share_object_impl(obj)
+    ghost::declare_global_mut<SpecShareAddress, address>();
+    ghost::declare_global_mut<SpecShareAddressExists, bool>();
+    let address = sui::object::id(&obj).to_address();
+    share_object_impl(obj);
+    ensures(ghost::global<SpecShareAddressExists, bool>() == true);
+    ensures(ghost::global<SpecShareAddress, address>() == address);
 }
 
 #[mode(spec), ext(spec(target = sui::transfer::transfer_impl))]
