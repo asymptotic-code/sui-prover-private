@@ -1,0 +1,30 @@
+---
+source: crates/sui-prover/tests/integration.rs
+expression: output
+---
+exiting with verification errors
+warning: UID object type not found, dynamic fields will be placed under UID
+  ┌─ tests/inputs/dynamic_field/occupancy_typed_absence.fail.move:6:5
+  │
+6 │     df::add(uid, key, true);
+  │     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: UID object type not found, dynamic fields will be placed under UID
+   ┌─ tests/inputs/dynamic_field/occupancy_typed_absence.fail.move:11:15
+   │
+11 │     requires(!df::exists_with_type<u64, bool>(uid, key));
+   │               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: UID object type not found, dynamic fields will be placed under UID
+   ┌─ tests/inputs/dynamic_field/occupancy_typed_absence.fail.move:13:13
+   │
+13 │     ensures(df::exists_with_type<u64, bool>(uid, key));
+   │             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: code should not abort
+  ┌─ tests/inputs/dynamic_field/occupancy_typed_absence.fail.move:6:5
+  │
+6 │     df::add(uid, key, true);
+  │     ^^^^^^^^^^^^^^^^^^^^^^^
+  │
+  =     at tests/inputs/dynamic_field/occupancy_typed_absence.fail.move:10: insert_spec

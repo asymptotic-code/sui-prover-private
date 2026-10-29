@@ -1,6 +1,5 @@
 ---
 source: crates/sui-prover/tests/integration.rs
-assertion_line: 297
 expression: output
 ---
 Verification successful
@@ -13,8 +12,8 @@ warning: UID object type not found, dynamic fields will be placed under UID
 warning: UID object type not found, dynamic fields will be placed under UID
    ┌─ tests/inputs/dynamic_field/uid_param_target.ok.move:34:14
    │
-34 │     asserts(!df::exists_with_type<WhitelistKey, bool>(uid, whitelist_key(addr)));
-   │              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+34 │     asserts(!df::exists<WhitelistKey>(uid, whitelist_key(addr)));
+   │              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 warning: UID object type not found, dynamic fields will be placed under UID
    ┌─ tests/inputs/dynamic_field/uid_param_target.ok.move:21:5
@@ -25,5 +24,5 @@ warning: UID object type not found, dynamic fields will be placed under UID
 warning: UID object type not found, dynamic fields will be placed under UID
    ┌─ tests/inputs/dynamic_field/uid_param_target.ok.move:40:14
    │
-40 │     asserts(!df::exists_with_type<AllowAllKey, bool>(uid, allow_all_key()));
-   │              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+40 │     asserts(!df::exists<AllowAllKey>(uid, allow_all_key()));
+   │              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

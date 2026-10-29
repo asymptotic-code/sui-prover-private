@@ -17,7 +17,7 @@ public fun generic_exists<K: copy + store + drop, V: store>(uid: &UID, key: K): 
 
 #[mode(spec), ext(spec(prove))]
 fun generic_add_u64_bool_spec(obj: &mut MyObject, key: u64, val: bool) {
-    requires(!df::exists_with_type<u64, bool>(&obj.id, key));
+    requires(!df::exists<u64>(&obj.id, key));
     generic_add<u64, bool>(&mut obj.id, key, val);
     ensures(df::exists_with_type<u64, bool>(&obj.id, key));
     ensures(*df::borrow<u64, bool>(&obj.id, key) == val);

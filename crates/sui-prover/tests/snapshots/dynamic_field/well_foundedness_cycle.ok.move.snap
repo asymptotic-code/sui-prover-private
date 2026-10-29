@@ -1,0 +1,22 @@
+---
+source: crates/sui-prover/tests/integration.rs
+expression: output
+---
+Verification successful
+warning: UID object type not found, dynamic fields will be placed under UID
+   ┌─ tests/inputs/dynamic_field/well_foundedness_cycle.ok.move:14:5
+   │
+14 │     df::add(&mut parent, 7u64, child);
+   │     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: UID object type not found, dynamic fields will be placed under UID
+   ┌─ tests/inputs/dynamic_field/well_foundedness_cycle.ok.move:15:33
+   │
+15 │     let child_ref: &mut Child = df::borrow_mut(&mut parent, 7u64);
+   │                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: UID object type not found, dynamic fields will be placed under UID
+   ┌─ tests/inputs/dynamic_field/well_foundedness_cycle.ok.move:17:39
+   │
+17 │     let Child { id, value: result } = df::remove<u64, Child>(&mut parent, 7u64);
+   │                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

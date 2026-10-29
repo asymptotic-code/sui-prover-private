@@ -108,6 +108,14 @@ impl DynamicFieldInfo {
             .unique()
     }
 
+    pub fn dynamic_field_names(&self, ty: &Type) -> impl Iterator<Item = &Type> + '_ {
+        self.dynamic_field_mappings
+            .get(ty)
+            .into_iter()
+            .flat_map(|entries| entries.iter().map(NameValueInfo::name))
+            .unique()
+    }
+
     /// union two DynamicFieldTypeInfo
     pub fn union(&self, other: &Self) -> Self {
         let mut new_info = self.clone();
@@ -860,48 +868,6 @@ impl FunctionTargetProcessor for DynamicFieldAnalysisProcessor {
                         })
                 }),
         );
-
-        // Detect well-foundedness cycles: a dynamic field value type that
-        // transitively contains the parent struct creates a Boogie datatype
-        // cycle (e.g. UID → Table<K,V> where Table has a UID field).
-        // Report the error at each function that introduces the cyclic usage.
-        let translated_funs: Vec<_> = targets.get_funs().collect();
-        for fun_id in &translated_funs {
-            let Some(data) = targets.get_data(fun_id, &FunctionVariant::Baseline) else {
-                continue;
-            };
-            let Some(info) = data.annotations.get::<DynamicFieldInfo>() else {
-                continue;
-            };
-            for (ty, name_value_set) in &info.dynamic_field_mappings {
-                let Some((struct_qid, _)) = ty.get_datatype() else {
-                    continue;
-                };
-                for nv in name_value_set {
-                    if let Some((_name, value)) = nv.as_name_value() {
-                        if type_transitively_contains_struct(
-                            env,
-                            value,
-                            &struct_qid,
-                            &mut BTreeSet::new(),
-                        ) {
-                            let fun_env = env.get_function(*fun_id);
-                            let struct_env = env.get_struct(struct_qid);
-                            env.error(
-                                &fun_env.get_loc(),
-                                &format!(
-                                    "function `{}` uses a dynamic field whose value type \
-                                     contains `{}`, creating a well-foundedness cycle in \
-                                     the Boogie datatype. This is not yet supported by the prover.",
-                                    fun_env.get_full_name_str(),
-                                    struct_env.get_full_name_str(),
-                                ),
-                            );
-                        }
-                    }
-                }
-            }
-        }
 
         // Set the combined info in the environment
         env.set_extension(combined_info);

@@ -17,7 +17,7 @@ public fun add_whitelist_address(uid: &mut UID, addr: address) {
 
 #[mode(spec), ext(spec(prove))]
 fun add_whitelist_spec(obj: &mut MyObject, addr: address) {
-    requires(!df::exists_with_type<WhitelistKey, bool>(&obj.id, WhitelistKey { address: addr }));
+    requires(!df::exists<WhitelistKey>(&obj.id, WhitelistKey { address: addr }));
     add_whitelist_address(&mut obj.id, addr);
     ensures(df::exists_with_type<WhitelistKey, bool>(&obj.id, WhitelistKey { address: addr }));
     ensures(*df::borrow<WhitelistKey, bool>(&obj.id, WhitelistKey { address: addr }) == true);

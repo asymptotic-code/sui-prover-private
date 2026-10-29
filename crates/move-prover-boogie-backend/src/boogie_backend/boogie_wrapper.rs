@@ -2170,6 +2170,17 @@ impl ModelValue {
         _key_ty: &Type,
         _val_ty: &Type,
     ) -> Option<ModelValueTable> {
+        if self.extract_list_ctor_prefix("EmptyTableValue_").is_some()
+            || self
+                .extract_literal()
+                .is_some_and(|name| name.starts_with("EmptyTableValue_"))
+        {
+            return Some(ModelValueTable {
+                keys: BTreeSet::new(),
+                values: BTreeMap::new(),
+                open: false,
+            });
+        }
         let args = self.extract_list_ctor_prefix("Table_")?;
         if args.len() != 3 {
             return None;

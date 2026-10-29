@@ -422,7 +422,7 @@ pub fn add_prelude(
         .chain(
             dynamic_field_instances
                 .iter()
-                .flat_map(|dynamic_field| dynamic_field.insts.iter().map(|(kty, _)| kty)),
+                .flat_map(|dynamic_field| dynamic_field.key_insts.iter()),
         )
         .collect::<BTreeSet<_>>()
         .into_iter()
