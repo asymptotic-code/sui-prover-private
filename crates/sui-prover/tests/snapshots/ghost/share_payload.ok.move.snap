@@ -1,0 +1,36 @@
+---
+source: crates/sui-prover/tests/integration.rs
+expression: output
+---
+Verification successful
+warning: duplicate alias
+  ┌─ tests/inputs/ghost/share_payload.ok.move:4:22
+  │
+4 │ use sui::tx_context::TxContext;
+  │                      ^^^^^^^^^ Unnecessary alias 'TxContext' for module member 'sui::tx_context::TxContext'. This alias is provided by default
+  │
+  = This warning can be suppressed with '#[allow(duplicate_alias)]' applied to the 'module' or module member ('const', 'fun', or 'struct')
+
+warning: duplicate alias
+  ┌─ tests/inputs/ghost/share_payload.ok.move:2:25
+  │
+2 │ use sui::object::{Self, UID};
+  │                         ^^^ Unnecessary alias 'UID' for module member 'sui::object::UID'. This alias is provided by default
+  │
+  = This warning can be suppressed with '#[allow(duplicate_alias)]' applied to the 'module' or module member ('const', 'fun', or 'struct')
+
+warning: duplicate alias
+  ┌─ tests/inputs/ghost/share_payload.ok.move:2:19
+  │
+2 │ use sui::object::{Self, UID};
+  │                   ^^^^ Unnecessary alias 'object' for module 'sui::object'. This alias is provided by default
+  │
+  = This warning can be suppressed with '#[allow(duplicate_alias)]' applied to the 'module' or module member ('const', 'fun', or 'struct')
+
+warning: duplicate alias
+  ┌─ tests/inputs/ghost/share_payload.ok.move:3:10
+  │
+3 │ use sui::transfer;
+  │          ^^^^^^^^ Unnecessary alias 'transfer' for module 'sui::transfer'. This alias is provided by default
+  │
+  = This warning can be suppressed with '#[allow(duplicate_alias)]' applied to the 'module' or module member ('const', 'fun', or 'struct')

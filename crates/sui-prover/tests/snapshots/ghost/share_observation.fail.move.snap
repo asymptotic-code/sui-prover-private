@@ -28,9 +28,9 @@ warning: duplicate alias
   = This warning can be suppressed with '#[allow(duplicate_alias)]' applied to the 'module' or module member ('const', 'fun', or 'struct')
 
 error: prover::ensures does not hold
-   ┌─ tests/inputs/ghost/share_observation.fail.move:17:5
+   ┌─ tests/inputs/ghost/share_observation.fail.move:18:5
    │
-17 │     ensures(false);
+18 │     ensures(false);
    │     ^^^^^^^^^^^^^^
    │
    =     at tests/inputs/ghost/share_observation.fail.move:10: share_spec

@@ -1,7 +1,7 @@
 module specs::transfer_spec;
 
 #[mode(spec), ext(spec_only)]
-use prover::prover::ensures;
+use prover::prover::{ensures, clone};
 #[mode(spec), ext(spec_only)]
 use prover::ghost;
 use sui::transfer::{freeze_object_impl, share_object_impl, party_transfer_impl, transfer_impl, receive_impl};
@@ -11,6 +11,7 @@ public struct SpecTransferAddress {}
 public struct SpecTransferAddressExists {}
 public struct SpecShareAddress {}
 public struct SpecShareAddressExists {}
+public struct SpecShareObject<phantom T: key> {}
 
 #[mode(spec), ext(spec(target = sui::transfer::freeze_object_impl))]
 fun freeze_object_impl_spec<T: key>(obj: T) {
@@ -21,10 +22,13 @@ fun freeze_object_impl_spec<T: key>(obj: T) {
 fun share_object_impl_spec<T: key>(obj: T) {
     ghost::declare_global_mut<SpecShareAddress, address>();
     ghost::declare_global_mut<SpecShareAddressExists, bool>();
+    ghost::declare_global_mut<SpecShareObject<T>, T>();
+    let snapshot = clone!(&obj);
     let address = sui::object::id(&obj).to_address();
     share_object_impl(obj);
     ensures(ghost::global<SpecShareAddressExists, bool>() == true);
     ensures(ghost::global<SpecShareAddress, address>() == address);
+    ensures(ghost::global<SpecShareObject<T>, T>() == snapshot);
 }
 
 #[mode(spec), ext(spec(target = sui::transfer::transfer_impl))]
