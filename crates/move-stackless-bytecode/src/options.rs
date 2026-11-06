@@ -96,6 +96,8 @@ pub struct ProverOptions {
     pub skip_spec_no_abort: bool,
     /// Skip checking external functions that do not abort
     pub skip_fun_no_abort: bool,
+    /// Run the package-wide bytecode transformation and stop
+    pub check_only: bool,
     /// CI mode
     pub ci: bool,
     /// Whether to emit debug trace instructions for counterexample generation
@@ -138,6 +140,7 @@ impl Default for ProverOptions {
             bv_int_encoding: true,
             skip_spec_no_abort: false,
             skip_fun_no_abort: false,
+            check_only: false,
             ci: false,
             debug_trace: true,
         }

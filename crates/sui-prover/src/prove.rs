@@ -129,6 +129,11 @@ pub struct GeneralConfig {
     #[clap(name = "skip-fun-no-abort", long, global = true)]
     pub skip_fun_no_abort: bool,
 
+    /// Run the package-wide bytecode transformation and stop: no backend code, no solver.
+    /// Reports what a whole-package run would refuse before generating anything.
+    #[clap(name = "check-only", long, global = true)]
+    pub check_only: bool,
+
     /// Dump control-flow graphs to file
     #[clap(name = "stats", long, global = false)]
     pub stats: bool,
@@ -285,6 +290,12 @@ pub async fn execute(
         .await;
     }
 
+    if general_config.check_only && matches!(general_config.backend, Backend::Lean) {
+        return Err(anyhow::anyhow!(
+            "--check-only runs the Boogie backend's transformation only"
+        ));
+    }
+
     match general_config.backend {
         Backend::Boogie => {
             execute_backend_boogie(model, &general_config, remote_config, boogie_config, filter)
@@ -338,6 +349,7 @@ async fn execute_backend_boogie(
     options.remote = remote_config.to_config()?;
     options.prover.skip_spec_no_abort = general_config.skip_spec_no_abort;
     options.prover.skip_fun_no_abort = general_config.skip_fun_no_abort;
+    options.prover.check_only = general_config.check_only;
     options.backend.force_timeout = general_config.force_timeout;
     options.backend.ci = general_config.ci;
     options.prover.ci = general_config.ci;
