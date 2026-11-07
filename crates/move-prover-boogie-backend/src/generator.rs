@@ -129,7 +129,7 @@ pub async fn run_move_prover_with_model<W: WriteColor>(
         };
     }
 
-    if options.remote.is_none() {
+    if options.remote.is_none() && !options.prover.check_only {
         // Check correct backend versions.
         options.backend.check_tool_versions()?;
     }
@@ -137,6 +137,10 @@ pub async fn run_move_prover_with_model<W: WriteColor>(
     // Check Filter Correctness
     if let Some(err) = options.filter.check_filter_correctness(env) {
         return Err(anyhow!(err));
+    }
+
+    if options.prover.check_only {
+        return run_check_only(env, &options, &targets, error_writer);
     }
 
     let output_path = std::path::Path::new(&options.output_path);
@@ -184,6 +188,33 @@ pub async fn run_move_prover_with_model<W: WriteColor>(
     }
 
     Ok(("Verification successful").to_string())
+}
+
+/// The package-wide transformation a verification starts with, and nothing after it: what
+/// it refuses, the package cannot generate past. Needs no solver. A spec's own transformation
+/// errors are not covered; they only appear when that spec is generated. `All` and per-module
+/// holders are no substitute: both refuse packages that generate fine.
+fn run_check_only<W: WriteColor>(
+    env: &GlobalEnv,
+    opt: &Options,
+    targets: &PackageTargets,
+    error_writer: &mut W,
+) -> anyhow::Result<String> {
+    let mut options = opt.clone();
+    options.backend.func_abort_check_only = true;
+    create_and_process_bytecode(
+        &options,
+        env,
+        targets,
+        FunctionHolderTarget::FunctionsAbortCheck,
+    );
+    check_errors(
+        env,
+        &options,
+        error_writer,
+        "exiting with bytecode transformation errors",
+    )?;
+    Ok("Package-wide transformation passed".to_owned())
 }
 
 async fn run_prover_spec_no_abort_check<W: WriteColor>(
